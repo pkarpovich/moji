@@ -420,9 +420,17 @@ The question this task answers, and nothing else: after a layout switch, which o
 
 ### Task 9: Update documentation
 
-- [ ] `README.md`: what moji is, the config file with the sample, the Karabiner contract (F19 on tap), the permissions it needs and why (Input Monitoring to see keys, Accessibility to hold and re-post them), the CLI
-- [ ] `CLAUDE.md`: any convention discovered during implementation (the replay strategy Task 3 proved, the run-loop-only threading)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `README.md`: what moji is, the config file with the sample, the Karabiner contract (F19 on tap), the permissions it needs and why (Input Monitoring to see keys, Accessibility to hold and re-post them), the CLI
+- [x] `CLAUDE.md`: any convention discovered during implementation (the replay strategy Task 3 proved, the run-loop-only threading)
+- [x] move this plan to `docs/plans/completed/`
+- + `CLAUDE.md` gained three rules, not two: the replay strategy (post the captured copy unchanged,
+  never translate a keycode), the run-loop consequences the threading section only implied (a
+  non-repeating `CFRunLoopTimer` is invalidated by its own fire, so the watchdog is a day-long
+  interval whose fire date moves; a signal handler sets a flag a repeating timer polls), and the
+  newtype-location precedent (`LayoutTag` in `macos/tis.rs`, `BundleId` in `macos/workspace.rs`).
+- + `README.md` documents the two no-notification rules the configuration and the memory enforce -
+  a cycle shorter than two entries, and a decided layout equal to the selected one - because both
+  read as arbitrary restrictions without the reason.
 
 ## Post-Completion
 

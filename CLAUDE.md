@@ -1,9 +1,9 @@
 # moji conventions
 
 `README.md` carries what moji is, its configuration and the contract with Karabiner; this file
-carries only the rules that govern how code is written here. The plan that builds the daemon, with
+carries only the rules that govern how code is written here. The plan that built the daemon, with
 the verified API behaviour behind every decision, is
-`docs/plans/20260918-moji-layout-daemon.md`.
+`docs/plans/completed/20260918-moji-layout-daemon.md`.
 
 ## Everything runs natively on macOS
 
@@ -25,11 +25,31 @@ TIS is not thread-safe and Apple documents it as main-thread-only. The daemon ha
 and no async runtime: the event tap callback, both notification observers, the barrier watchdog and
 every TIS call are sources on the main thread's `CFRunLoop`.
 
+That shapes anything periodic or asynchronous. A distributed notification is delivered on the main
+run loop and nowhere else. A `CFRunLoopTimer` that does not repeat is invalidated by its own fire,
+so a one-shot like the watchdog is a timer whose interval is a day: arming it pushes its next fire
+date, it is never recreated. A signal handler may not stop a run loop, so SIGTERM sets a flag and a
+repeating timer polls it - the same shape the upgrade watch in `executable.rs` uses.
+
 ## The ordering logic is pure
 
 `src/barrier.rs` and `src/memory.rs` take plain data and the clock, and return decisions the
 `src/macos/` layer executes. The barrier never holds a Core Foundation object and the tap layer owns
 the queue of held events. That split is what makes the ordering testable with a fake clock.
+
+## A replayed event is the captured one, unchanged
+
+Measured on this machine, and the reason the tap layer carries no keycode translation: re-posting
+the very `CGEvent` a tap captured before the switch types the letter of the layout selected **after**
+the capture. A captured event carrying the unicode string `"a"`, posted once Russian was selected,
+typed `ф`. The receiving application re-translates the keycode against the current source and
+ignores the unicode string the event carries.
+
+So `HeldEvent` is a `CGEventCreateCopy` posted as it is, plus a magic value written into
+`kCGEventSourceUserData`. That magic is what keeps the tap from re-entering the barrier on its own
+replays, and it is the only thing a replayed event carries that the captured one did not. Do not
+add `CGEventKeyboardSetUnicodeString`, and do not reach for `UCKeyTranslate`: nothing needs moji to
+know which letter a keycode makes.
 
 ## Tests live inline, except the ones that need the main thread
 
@@ -87,5 +107,7 @@ identifier loses them silently.
 - `let ... else` for early returns; the main path stays flat.
 - `match` covers every variant explicitly; no `_ =>` wildcard and no `matches!`.
 - Destructure structs and tuples explicitly.
-- Newtypes over bare strings for identifiers; enums over `bool` parameters.
+- Newtypes over bare strings for identifiers; enums over `bool` parameters. A newtype is declared in
+  the module that produces one - `LayoutTag` in `macos/tis.rs`, `BundleId` in `macos/workspace.rs` -
+  and the pure modules import it from there rather than declaring their own.
 - The daemon must never panic: a layout that no tag names is ordinary input, never an unwrap.
