@@ -394,11 +394,29 @@ The question this task answers, and nothing else: after a layout switch, which o
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify every requirement from Overview is implemented: barrier with watchdog, config-driven per-app layout with remember fallback, the CLI surface, name-based layout matching
-- [ ] verify edge cases: a config naming a layout that is not enabled fails at startup with the enabled names listed; a daemon started without a permission logs the System Settings pane by name and exits non-zero; `moji status` on a machine where the daemon is not running still answers from TIS
-- [ ] run the full suite: `mise run check`
-- [ ] run the live suite on the user's Mac with permissions granted: `scripts/acceptance.sh`
-- [ ] grep gates: no `unsafe` outside `src/macos/`, no `#[allow(dead_code)]`, no `_ =>` wildcard arms, no comments inside function bodies
+- [x] verify every requirement from Overview is implemented: barrier with watchdog, config-driven per-app layout with remember fallback, the CLI surface, name-based layout matching
+- [x] verify edge cases: a config naming a layout that is not enabled fails at startup with the enabled names listed; a daemon started without a permission logs the System Settings pane by name and exits non-zero; `moji status` on a machine where the daemon is not running still answers from TIS
+- [x] run the full suite: `mise run check`
+- [x] run the live suite on the user's Mac with permissions granted: `scripts/acceptance.sh`
+- [x] grep gates: no `unsafe` outside `src/macos/`, no `#[allow(dead_code)]`, no `_ =>` wildcard arms, no comments inside function bodies
+- + Measured from the shell against the release binary, with no daemon running and no configuration
+  at the default path. `moji list` prints the three enabled layouts; `moji status` answers from TIS
+  alone (`Russian - Universal`, frontmost `ru.keepcoder.Telegram`) and prints `tag -` when no
+  configuration names it; `MOJI_CONFIG` pointing at a config whose `ru` names `Klingon - Universal`
+  fails with `no enabled keyboard layout is named ru = Klingon - Universal; enabled: ABC, English -
+  Universal, Russian - Universal` and exit 1; `moji set en` then `moji toggle` walks `en -> ru` and
+  `moji set bogus` exits 1. `scripts/acceptance.sh` passed all five live scenarios: the confirmed
+  switch typed `ффффф` with 0 watchdog releases, the disconnected one with 1 release after 155 ms,
+  and the pinned activation left the layout on `English - Universal`.
+- + The permission edge case is verified by inspection and by the unit test
+  `every_access_names_the_pane_that_grants_it`, not live: revoking the terminal's Input Monitoring
+  grant to observe the failure would also cost every other live scenario its grant. `moji run`
+  calls `tap::request_missing_access` first, logs `access.pane()` per missing grant and returns
+  `ExitCode::FAILURE`.
+- + The `#[allow(dead_code)]` gate passes as the convention states it: the four occurrences
+  (`daemon::Daemon::tap`, `daemon::Daemon::activation`, `timer::Timer::on_fire`, `tap::Tap::context`)
+  are field-level allows with a `reason`, each naming the pointer Core Foundation holds instead of
+  Rust. No module carries a blanket one.
 
 ### Task 9: Update documentation
 
