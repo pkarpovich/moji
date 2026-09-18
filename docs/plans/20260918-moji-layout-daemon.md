@@ -193,13 +193,15 @@ Copied from nikki with the label `dev.pkarpovich.moji`: `install` writes `~/Libr
 - Create: `src/main.rs`, `src/macos/mod.rs`
 - Create: `scripts/bundle.sh`, `scripts/acceptance.sh`
 
-- [ ] `Cargo.toml`: package `moji`, edition 2024, the dependency set from Context pinned to nikki's versions, `[profile.release]` with `lto`, `strip`
-- [ ] `mise.toml` with the `build`/`test`/`lint`/`fmt`/`check` tasks as in nikki; `build.rs` + `Info.plist.template` with bundle id `dev.pkarpovich.moji` and `CFBundleName` `moji`
-- [ ] `src/main.rs`: `argh` command enum with every subcommand from Technical Details, each returning "not implemented" for now except `--version`, which prints `moji <CARGO_PKG_VERSION>`
-- [ ] `scripts/bundle.sh` assembling `Moji.app` (executable `moji`, `LSUIElement` true, no icon yet) and `scripts/acceptance.sh` that builds release, checks the embedded plist's `CFBundleIdentifier`, and runs the `#[ignore]`d live tests added by later tasks
-- [ ] `CLAUDE.md`: the conventions from Development Approach (unsafe containment, inline tests, declare every module, main-thread TIS)
-- [ ] write tests for the command parser: every subcommand and flag parses, an unknown subcommand is an error
-- [ ] run `mise run check` - must pass before task 2
+- [x] `Cargo.toml`: package `moji`, edition 2024, the dependency set from Context pinned to nikki's versions, `[profile.release]` with `lto`, `strip`
+- [x] `mise.toml` with the `build`/`test`/`lint`/`fmt`/`check` tasks as in nikki; `build.rs` + `Info.plist.template` with bundle id `dev.pkarpovich.moji` and `CFBundleName` `moji`
+- [x] `src/main.rs`: `argh` command enum with every subcommand from Technical Details, each returning "not implemented" for now except `--version`, which prints `moji <CARGO_PKG_VERSION>`
+- [x] `scripts/bundle.sh` assembling `Moji.app` (executable `moji`, `LSUIElement` true, no icon yet) and `scripts/acceptance.sh` that builds release, checks the embedded plist's `CFBundleIdentifier`, and runs the `#[ignore]`d live tests added by later tasks
+- [x] `CLAUDE.md`: the conventions from Development Approach (unsafe containment, inline tests, declare every module, main-thread TIS)
+- [x] write tests for the command parser: every subcommand and flag parses, an unknown subcommand is an error
+- [x] run `mise run check` - must pass before task 2
+- + `scripts/acceptance.sh` also asserts that `scripts/bundle.sh` assembles `Moji.app` with `CFBundleIdentifier = dev.pkarpovich.moji`: nothing else in the repository runs the bundle script, and both TCC grants depend on it. Its `LIVE_TESTS` array is empty until Task 3 adds the first `#[ignore]`d test.
+- + The dependency set omits `libc`: nothing in v1 needs it before the SIGTERM handling of Task 5, which adds it then.
 
 ### Task 2: TIS layer with name-based resolution
 
