@@ -4,6 +4,8 @@ use std::process::ExitCode;
 
 use argh::FromArgs;
 
+use crate::macos::tis::{self, Layout};
+
 const SUBCOMMANDS: &str = "run, set, toggle, status, list, install, uninstall";
 
 /// moji owns keyboard layout switching on this Mac.
@@ -97,11 +99,40 @@ fn main() -> ExitCode {
         Command::Run(Run {}) => not_implemented("run"),
         Command::Set(Set { tag }) => not_implemented(&format!("set {tag}")),
         Command::Toggle(Toggle {}) => not_implemented("toggle"),
-        Command::Status(Status {}) => not_implemented("status"),
-        Command::List(List {}) => not_implemented("list"),
+        Command::Status(Status {}) => status(),
+        Command::List(List {}) => list(),
         Command::Install(Install {}) => not_implemented("install"),
         Command::Uninstall(Uninstall {}) => not_implemented("uninstall"),
     }
+}
+
+fn list() -> ExitCode {
+    let layouts = tis::enabled_layouts();
+    if layouts.is_empty() {
+        tracing::error!("Text Input Sources reports no enabled keyboard layout");
+        return ExitCode::FAILURE;
+    }
+
+    for layout in layouts {
+        let Layout { name, id, language } = layout;
+        let language = language.unwrap_or_else(|| "-".to_string());
+        println!("{name}\t{id}\t{language}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn status() -> ExitCode {
+    let Some(layout) = tis::current() else {
+        tracing::error!("Text Input Sources reports no selected keyboard layout");
+        return ExitCode::FAILURE;
+    };
+
+    let Layout { name, id, language } = layout;
+    let language = language.unwrap_or_else(|| "-".to_string());
+    println!("layout\t{name}");
+    println!("id\t{id}");
+    println!("language\t{language}");
+    ExitCode::SUCCESS
 }
 
 fn not_implemented(command: &str) -> ExitCode {

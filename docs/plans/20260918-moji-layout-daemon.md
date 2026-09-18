@@ -209,14 +209,20 @@ Copied from nikki with the label `dev.pkarpovich.moji`: `install` writes `~/Libr
 - Create: `src/macos/tis.rs`
 - Modify: `src/macos/mod.rs`, `src/main.rs`
 
-- [ ] declare the TIS functions and property keys from Context in `tis.rs` with `#[link(name = "Carbon", kind = "framework")]`; wrap `TISInputSourceRef` in an owned newtype that releases on drop
-- [ ] `enabled_layouts()`: list, filter to keyboard-layout category + enabled + select-capable, read name/id/language into `Layout`
-- [ ] `current()` and `select(&Layout)` (re-fetching by name, error on no match or non-zero `OSStatus`)
-- [ ] `observe_changes` on the distributed center with `deliverImmediately`, returning a guard that removes the observer on drop
-- [ ] wire `moji list` and `moji status` (status without the frontmost app for now)
-- [ ] write tests: the pure name matcher (`resolve(tags, layouts)`) resolves every tag, reports every unresolved tag by name, and rejects two tags mapped to one name; a `Layout` with the ABC name and language `en` does not satisfy a tag whose name is `English - Universal`
-- [ ] write an `#[ignore]`d live test: `enabled_layouts()` on this machine contains at least one layout and `current()` is one of them; `select` to another and back leaves `current()` where it started
-- [ ] run `mise run check` - must pass before task 3
+- [x] declare the TIS functions and property keys from Context in `tis.rs` with `#[link(name = "Carbon", kind = "framework")]`; wrap `TISInputSourceRef` in an owned newtype that releases on drop
+- [x] `enabled_layouts()`: list, filter to keyboard-layout category + enabled + select-capable, read name/id/language into `Layout`
+- [x] `current()` and `select(&Layout)` (re-fetching by name, error on no match or non-zero `OSStatus`)
+- [x] `observe_changes` on the distributed center with `deliverImmediately`, returning a guard that removes the observer on drop
+- [x] wire `moji list` and `moji status` (status without the frontmost app for now)
+- [x] write tests: the pure name matcher (`resolve(tags, layouts)`) resolves every tag, reports every unresolved tag by name, and rejects two tags mapped to one name; a `Layout` with the ABC name and language `en` does not satisfy a tag whose name is `English - Universal`
+- [x] write an `#[ignore]`d live test: `enabled_layouts()` on this machine contains at least one layout and `current()` is one of them; `select` to another and back leaves `current()` where it started
+- [x] run `mise run check` - must pass before task 3
+- + The extern block declares `kTISPropertyInputSourceLanguages` as well: Context lists the keys the filter needs, but `Layout.language` has no other source. Each symbol is declared under a Rust name with `#[link_name = "..."]`, which keeps the block free of a `non_upper_case_globals` allow.
+- + `observe_changes` gets `deliverImmediately` by calling `setSuspended(false)` on the distributed center: the block-based `addObserverForName:object:queue:usingBlock:` has no suspension-behavior parameter, and the selector-based API that does would need an Objective-C class.
+- + `LayoutTag` lives in `tis.rs`, not in `barrier.rs`: `resolve` needs it one task earlier. Task 4 imports it from there instead of declaring it again.
+- + Measured on this machine: a distributed notification is delivered on the main run loop only. Cargo runs every test on a worker thread, so a live test cannot observe a real layout change; the live observer test asserts that the center is installed unsuspended and the guard removes it, and the delivery itself is proven by the Task 3 harness, which owns the main thread.
+- + `select`, `observe_changes` and `resolve` carry `#[cfg_attr(not(test), allow(dead_code, reason = "..."))]`, each naming the task that wires it. Nothing in `moji run` exists yet, so the bin target cannot reach them while the test target can. The task that wires each one deletes its attribute.
+- + `moji status` prints name, id and language: the tag needs the configuration, which Task 6 adds.
 
 ### Task 3: Translation spike as a live test harness
 
