@@ -13,6 +13,7 @@ LIVE_TESTS=(
 	an_untouched_view_is_empty_and_a_set_string_reads_back
 	letters_typed_immediately_after_the_switch_land_in_the_new_layout
 	a_switch_that_is_never_confirmed_still_releases_the_keys
+	activating_a_pinned_application_selects_its_layout
 )
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

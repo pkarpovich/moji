@@ -17,6 +17,8 @@ use crate::macos::signals;
 use crate::macos::tap::{self, Held, Placement, Tap, TapError};
 use crate::macos::timer::{Repeat, Timer, TimerError};
 use crate::macos::tis::{self, ChangeObserver, Layout, LayoutTag};
+use crate::macos::workspace::{self, ActivationObserver, BundleId};
+use crate::memory::Memory;
 
 /// How long a switch may wait for its confirmation before the held keys go through anyway.
 pub const HOLD: Duration = Duration::from_millis(50);
@@ -52,10 +54,15 @@ pub struct Daemon {
     )]
     tap: Tap,
     observer: Option<ChangeObserver>,
+    #[allow(
+        dead_code,
+        reason = "the activation observer is held so that dropping the daemon unsubscribes it"
+    )]
+    activation: ActivationObserver,
 }
 
 impl Daemon {
-    /// Installs the tap, the input source observer and the watchdog on the current run loop.
+    /// Installs the tap, both notification observers and the watchdog on the current run loop.
     ///
     /// # Errors
     ///
@@ -65,10 +72,12 @@ impl Daemon {
     pub fn start(
         cycle: Vec<LayoutTag>,
         layouts: BTreeMap<LayoutTag, Layout>,
+        pins: BTreeMap<BundleId, LayoutTag>,
         hold: Duration,
     ) -> Result<Daemon, StartError> {
         let state = Rc::new(State {
             barrier: RefCell::new(Barrier::new(cycle, hold)),
+            memory: RefCell::new(Memory::new(pins)),
             layouts,
             held: Held::empty(),
             releases: Cell::new(Releases::default()),
@@ -95,10 +104,15 @@ impl Daemon {
         let observing = Rc::clone(&state);
         let observer = tis::observe_changes(move || observing.on_confirmation());
 
+        let activating = Rc::clone(&state);
+        let activation =
+            workspace::observe_activation(move |app| activating.on_activation(app, Instant::now()));
+
         Ok(Daemon {
             state,
             tap,
             observer: Some(observer),
+            activation,
         })
     }
 
@@ -108,8 +122,23 @@ impl Daemon {
             state,
             tap: _,
             observer: _,
+            activation: _,
         } = self;
         state.releases.get()
+    }
+
+    /// Runs the per-application policy for `app` as if the workspace had announced it.
+    ///
+    /// The live suite calls this because an unbundled binary carries no bundle id of its own, so
+    /// the notification the daemon subscribes to cannot name the harness window.
+    pub fn activated(&self, app: BundleId) {
+        let Daemon {
+            state,
+            tap: _,
+            observer: _,
+            activation: _,
+        } = self;
+        state.on_activation(app, Instant::now());
     }
 
     /// Stops listening for input source changes, so nothing confirms a switch any more.
@@ -121,6 +150,7 @@ impl Daemon {
             state: _,
             tap: _,
             observer,
+            activation: _,
         } = self;
         observer.take();
     }
@@ -154,6 +184,7 @@ fn stop_when_terminating() {
 
 struct State {
     barrier: RefCell<Barrier>,
+    memory: RefCell<Memory>,
     layouts: BTreeMap<LayoutTag, Layout>,
     held: Held,
     releases: Cell<Releases>,
@@ -196,6 +227,8 @@ impl State {
 
     fn on_confirmation(&self) {
         let current = self.current_tag();
+        self.remember(current.clone());
+
         let released = {
             let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
                 return;
@@ -206,6 +239,41 @@ impl State {
             return;
         }
         self.release();
+    }
+
+    fn on_activation(&self, app: BundleId, now: Instant) {
+        let current = self.current_tag();
+        let decided = {
+            let Ok(mut memory) = self.memory.try_borrow_mut() else {
+                return;
+            };
+            memory.on_activated(app, current)
+        };
+        let Some(tag) = decided else {
+            return;
+        };
+
+        let accepted = {
+            let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
+                return;
+            };
+            barrier.on_select(tag.clone(), now)
+        };
+        if !accepted {
+            return;
+        }
+        self.arm();
+        self.select(&tag);
+    }
+
+    fn remember(&self, current: Option<LayoutTag>) {
+        let Some(app) = workspace::frontmost() else {
+            return;
+        };
+        let Ok(mut memory) = self.memory.try_borrow_mut() else {
+            return;
+        };
+        memory.on_layout_changed(app, current);
     }
 
     fn on_deadline(&self, now: Instant) {

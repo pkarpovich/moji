@@ -2,9 +2,12 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use argh::FromArgs;
+use moji::barrier;
+use moji::config::{self, Config};
 use moji::daemon::{self, Daemon};
 use moji::macos::tap;
 use moji::macos::tis::{self, Layout, LayoutTag};
+use moji::macos::workspace;
 
 const SUBCOMMANDS: &str = "run, set, toggle, status, list, install, uninstall";
 
@@ -87,7 +90,7 @@ fn main() -> ExitCode {
     }
 
     if check_config {
-        return not_implemented("--check-config");
+        return check();
     }
 
     let Some(command) = command else {
@@ -97,8 +100,8 @@ fn main() -> ExitCode {
 
     match command {
         Command::Run(Run {}) => run(),
-        Command::Set(Set { tag }) => not_implemented(&format!("set {tag}")),
-        Command::Toggle(Toggle {}) => not_implemented("toggle"),
+        Command::Set(Set { tag }) => set(&LayoutTag(tag)),
+        Command::Toggle(Toggle {}) => toggle(),
         Command::Status(Status {}) => status(),
         Command::List(List {}) => list(),
         Command::Install(Install {}) => not_implemented("install"),
@@ -118,29 +121,19 @@ fn run() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let layouts = tis::enabled_layouts();
-    if layouts.len() < 2 {
-        tracing::error!("moji needs at least two enabled keyboard layouts to switch between");
+    let Some(config) = loaded() else {
         return ExitCode::FAILURE;
-    }
+    };
+    let Some(resolved) = resolved(&config) else {
+        return ExitCode::FAILURE;
+    };
+    let Config {
+        cycle,
+        layouts,
+        apps,
+    } = config;
 
-    let mut cycle = Vec::new();
-    let mut tagged = BTreeMap::new();
-    let mut names = Vec::new();
-    for layout in layouts {
-        let Layout {
-            name,
-            id: _,
-            language: _,
-        } = &layout;
-        let tag = LayoutTag(name.clone());
-        names.push(name.clone());
-        cycle.push(tag.clone());
-        tagged.insert(tag, layout);
-    }
-    tracing::warn!("moji has no configuration yet, so it cycles through every enabled layout");
-
-    let daemon = match Daemon::start(cycle, tagged, daemon::HOLD) {
+    let daemon = match Daemon::start(cycle, resolved, apps, daemon::HOLD) {
         Ok(daemon) => daemon,
         Err(error) => {
             tracing::error!(%error, "moji could not install its run loop sources");
@@ -149,7 +142,7 @@ fn run() -> ExitCode {
     };
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        layouts = names.join(", "),
+        layouts = described(&layouts),
         "moji is running"
     );
 
@@ -185,15 +178,184 @@ fn status() -> ExitCode {
 
     let Layout { name, id, language } = layout;
     let language = language.unwrap_or_else(|| "-".to_string());
+    let tag = match configured_tag(&name) {
+        Some(tag) => tag.to_string(),
+        None => "-".to_string(),
+    };
+    let frontmost = match workspace::frontmost() {
+        Some(frontmost) => frontmost.to_string(),
+        None => "-".to_string(),
+    };
+
     println!("layout\t{name}");
     println!("id\t{id}");
     println!("language\t{language}");
+    println!("tag\t{tag}");
+    println!("frontmost\t{frontmost}");
+    ExitCode::SUCCESS
+}
+
+fn set(tag: &LayoutTag) -> ExitCode {
+    let Some(config) = loaded() else {
+        return ExitCode::FAILURE;
+    };
+    let Some(resolved) = resolved(&config) else {
+        return ExitCode::FAILURE;
+    };
+
+    let Some(layout) = resolved.get(tag) else {
+        tracing::error!(%tag, "the configuration carries no layout under this tag");
+        return ExitCode::FAILURE;
+    };
+    select(layout)
+}
+
+fn toggle() -> ExitCode {
+    let Some(config) = loaded() else {
+        return ExitCode::FAILURE;
+    };
+    let Some(resolved) = resolved(&config) else {
+        return ExitCode::FAILURE;
+    };
+    let Config {
+        cycle,
+        layouts: _,
+        apps: _,
+    } = &config;
+
+    let current = current_tag(&resolved);
+    let Some(next) = barrier::next(cycle, current.as_ref()) else {
+        tracing::error!("the configured cycle is empty, so there is nothing to toggle to");
+        return ExitCode::FAILURE;
+    };
+    let Some(layout) = resolved.get(&next) else {
+        tracing::error!(tag = %next, "the configuration carries no layout under this tag");
+        return ExitCode::FAILURE;
+    };
+    select(layout)
+}
+
+fn check() -> ExitCode {
+    let Some(config) = loaded() else {
+        return ExitCode::FAILURE;
+    };
+    let Some(resolved) = resolved(&config) else {
+        return ExitCode::FAILURE;
+    };
+    let Config {
+        cycle,
+        layouts: _,
+        apps,
+    } = &config;
+
+    let mut order = String::new();
+    for tag in cycle {
+        if !order.is_empty() {
+            order.push_str(" -> ");
+        }
+        order.push_str(&tag.to_string());
+    }
+    println!("cycle\t{order}");
+
+    for (tag, layout) in &resolved {
+        let Layout {
+            name,
+            id: _,
+            language: _,
+        } = layout;
+        println!("{tag}\t{name}");
+    }
+    for (bundle, tag) in apps {
+        println!("{bundle}\t{tag}");
+    }
     ExitCode::SUCCESS
 }
 
 fn not_implemented(command: &str) -> ExitCode {
     tracing::error!(command, "not implemented yet");
     ExitCode::FAILURE
+}
+
+fn select(layout: &Layout) -> ExitCode {
+    let Err(error) = tis::select(layout) else {
+        return ExitCode::SUCCESS;
+    };
+    tracing::error!(%error, "the layout could not be selected");
+    ExitCode::FAILURE
+}
+
+fn loaded() -> Option<Config> {
+    match config::load() {
+        Ok(config) => Some(config),
+        Err(error) => {
+            tracing::error!(%error, "the configuration could not be loaded");
+            None
+        }
+    }
+}
+
+fn resolved(config: &Config) -> Option<BTreeMap<LayoutTag, Layout>> {
+    let Config {
+        cycle: _,
+        layouts,
+        apps: _,
+    } = config;
+    match tis::resolve(layouts, &tis::enabled_layouts()) {
+        Ok(resolved) => Some(resolved),
+        Err(error) => {
+            tracing::error!(%error, "the configured layouts are not all enabled");
+            None
+        }
+    }
+}
+
+fn current_tag(layouts: &BTreeMap<LayoutTag, Layout>) -> Option<LayoutTag> {
+    let Layout {
+        name,
+        id: _,
+        language: _,
+    } = tis::current()?;
+
+    for (tag, layout) in layouts {
+        let Layout {
+            name: candidate,
+            id: _,
+            language: _,
+        } = layout;
+        if *candidate == name {
+            return Some(tag.clone());
+        }
+    }
+    None
+}
+
+fn configured_tag(name: &str) -> Option<LayoutTag> {
+    let Ok(config) = config::load() else {
+        return None;
+    };
+    let Config {
+        cycle: _,
+        layouts,
+        apps: _,
+    } = config;
+
+    for (tag, candidate) in layouts {
+        if candidate == name {
+            return Some(tag);
+        }
+    }
+    None
+}
+
+fn described(layouts: &BTreeMap<LayoutTag, String>) -> String {
+    let mut described = String::new();
+    for (tag, name) in layouts {
+        if !described.is_empty() {
+            described.push_str(", ");
+        }
+        described.push_str(&format!("{tag} = {name}"));
+    }
+    described
 }
 
 #[cfg(test)]

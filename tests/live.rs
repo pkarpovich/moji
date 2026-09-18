@@ -18,6 +18,7 @@ use moji::barrier::SIGNAL_KEYCODE;
 use moji::daemon::{Daemon, Releases};
 use moji::macos::harness::{self, KEYCODE_A, Stroke, Window};
 use moji::macos::tis::{self, Layout, LayoutTag};
+use moji::macos::workspace::{self, BundleId};
 
 const ENGLISH: &str = "English - Universal";
 const RUSSIAN: &str = "Russian - Universal";
@@ -42,6 +43,10 @@ const SCENARIOS: &[(&str, fn())] = &[
     (
         "a_switch_that_is_never_confirmed_still_releases_the_keys",
         a_switch_that_is_never_confirmed_still_releases_the_keys,
+    ),
+    (
+        "activating_a_pinned_application_selects_its_layout",
+        activating_a_pinned_application_selects_its_layout,
     ),
 ];
 
@@ -215,6 +220,14 @@ fn a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_capture
 }
 
 fn start_daemon(english: &Layout, russian: &Layout) -> Daemon {
+    start_daemon_pinning(english, russian, BTreeMap::new())
+}
+
+fn start_daemon_pinning(
+    english: &Layout,
+    russian: &Layout,
+    pins: BTreeMap<BundleId, LayoutTag>,
+) -> Daemon {
     let english_tag = LayoutTag("en".to_string());
     let russian_tag = LayoutTag("ru".to_string());
 
@@ -223,7 +236,7 @@ fn start_daemon(english: &Layout, russian: &Layout) -> Daemon {
     layouts.insert(russian_tag.clone(), russian.clone());
     let cycle = vec![english_tag, russian_tag];
 
-    let Ok(daemon) = Daemon::start(cycle, layouts, HOLD) else {
+    let Ok(daemon) = Daemon::start(cycle, layouts, pins, HOLD) else {
         panic!(
             "the daemon could not install its tap: is Input Monitoring granted to this terminal?"
         );
@@ -320,6 +333,60 @@ fn a_switch_that_is_never_confirmed_still_releases_the_keys() {
     assert!(
         waited < Duration::from_millis(500),
         "the keyboard was stuck for {waited:?}, which is far past the {HOLD:?} deadline"
+    );
+}
+
+fn wait_for_layout(window: &Window, name: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let Some(current) = tis::current() else {
+            panic!("no keyboard layout is selected at all");
+        };
+        let Layout {
+            name: selected,
+            id: _,
+            language: _,
+        } = current;
+        if selected == name {
+            return selected;
+        }
+        if Instant::now() >= deadline {
+            return selected;
+        }
+        window.pump(Duration::from_millis(10));
+    }
+}
+
+fn activating_a_pinned_application_selects_its_layout() {
+    let english = layout_named(ENGLISH);
+    let russian = layout_named(RUSSIAN);
+
+    let window = Window::open();
+    select_and_wait(&window, &russian);
+
+    let app = match workspace::frontmost() {
+        Some(app) => app,
+        None => BundleId("dev.pkarpovich.moji.live".to_string()),
+    };
+    println!("live: the pinned application is {app}");
+
+    let mut pins = BTreeMap::new();
+    pins.insert(app.clone(), LayoutTag("en".to_string()));
+    let daemon = start_daemon_pinning(&english, &russian, pins);
+
+    daemon.activated(app);
+    let selected = wait_for_layout(&window, ENGLISH, SETTLE);
+    let Releases { count, last: _ } = daemon.releases();
+    drop(daemon);
+
+    println!("live: activating the pinned application left the layout on {selected:?}");
+    assert_eq!(
+        selected, ENGLISH,
+        "the application pinned to en was activated on {RUSSIAN} and the layout stayed there"
+    );
+    assert_eq!(
+        count, 0,
+        "an activation select held keys, which it must never do"
     );
 }
 

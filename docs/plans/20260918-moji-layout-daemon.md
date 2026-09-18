@@ -333,16 +333,34 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/config.rs`, `src/memory.rs`, `src/macos/workspace.rs`
 - Modify: `src/main.rs`, `src/macos/mod.rs`
 
-- [ ] `config.rs`: the schema from Technical Details with `serde` + `toml`, `deny_unknown_fields`, path resolution (`MOJI_CONFIG` then `$HOME/.config/moji/config.toml`), errors that name the file and the field; `moji --check-config`
-- [ ] `memory.rs`: `Memory::new(pins: HashMap<BundleId, LayoutTag>)`, `on_layout_changed`, `on_activated` per Technical Details
-- [ ] `workspace.rs`: `frontmost() -> Option<BundleId>` and `observe_activation(on_activate: impl Fn(BundleId) + 'static) -> ActivationObserver` over `NSWorkspaceDidActivateApplicationNotification`, callback on the main run loop
-- [ ] wire into `moji run`: TIS notification -> `memory.on_layout_changed(frontmost, current)`; activation -> `memory.on_activated(app, current)` -> `barrier.on_select(tag, now)` -> `tis::select` only when accepted; `moji status` gains the frontmost bundle id
-- [ ] write tests (TDD) for config: the sample parses; a tag in `apps` missing from `layouts` is an error naming both; an unknown field is an error; a `cycle` shorter than two entries is an error; `MOJI_CONFIG` wins over the default path
-- [ ] write tests (TDD) for memory: a pinned app returns its pin even after a different layout was recorded for it; a remembered app returns the last recorded layout; an unknown app returns `None`; recording for app A does not affect app B; an app activated on `ru` that never switched, then left for a pinned `en` app, returns `ru` when activated again (the Tuna round trip); a pin equal to the current layout returns `None`; `None` as the current layout records nothing and still answers for the incoming app
-- [ ] write the `#[ignore]`d live test `activating_a_pinned_application_selects_its_layout`: with Russian selected, activate the harness window's own bundle id pinned to `en` through the daemon's wiring; `current()` becomes `English - Universal`
-- [ ] run `mise run check` and `scripts/acceptance.sh` - must pass before task 7
+- [x] `config.rs`: the schema from Technical Details with `serde` + `toml`, `deny_unknown_fields`, path resolution (`MOJI_CONFIG` then `$HOME/.config/moji/config.toml`), errors that name the file and the field; `moji --check-config`
+- [x] `memory.rs`: `Memory::new(pins: HashMap<BundleId, LayoutTag>)`, `on_layout_changed`, `on_activated` per Technical Details
+- [x] `workspace.rs`: `frontmost() -> Option<BundleId>` and `observe_activation(on_activate: impl Fn(BundleId) + 'static) -> ActivationObserver` over `NSWorkspaceDidActivateApplicationNotification`, callback on the main run loop
+- [x] wire into `moji run`: TIS notification -> `memory.on_layout_changed(frontmost, current)`; activation -> `memory.on_activated(app, current)` -> `barrier.on_select(tag, now)` -> `tis::select` only when accepted; `moji status` gains the frontmost bundle id
+- [x] write tests (TDD) for config: the sample parses; a tag in `apps` missing from `layouts` is an error naming both; an unknown field is an error; a `cycle` shorter than two entries is an error; `MOJI_CONFIG` wins over the default path
+- [x] write tests (TDD) for memory: a pinned app returns its pin even after a different layout was recorded for it; a remembered app returns the last recorded layout; an unknown app returns `None`; recording for app A does not affect app B; an app activated on `ru` that never switched, then left for a pinned `en` app, returns `ru` when activated again (the Tuna round trip); a pin equal to the current layout returns `None`; `None` as the current layout records nothing and still answers for the incoming app
+- [x] write the `#[ignore]`d live test `activating_a_pinned_application_selects_its_layout`: with Russian selected, activate the harness window's own bundle id pinned to `en` through the daemon's wiring; `current()` becomes `English - Universal`
+- [x] run `mise run check` and `scripts/acceptance.sh` - must pass before task 7
 - + Delete the no-configuration fallback Task 5 left in `moji run`: the cycle it builds from every
-  enabled layout, the tags it makes from localized names, and the warning that announces it.
+  enabled layout, the tags it makes from localized names, and the warning that announces it. Done.
+- + `BundleId` lives in `src/macos/workspace.rs`, the module that produces one, and `config.rs` and
+  `memory.rs` import it from there. That is the precedent Task 2 set with `LayoutTag` in `tis.rs`.
+- + The live test is a scenario in `tests/live.rs`, not an `#[ignore]`d test, for the reason Task 3
+  recorded. It drives `Daemon::activated(BundleId)` rather than a real workspace notification:
+  measured, `workspace::frontmost()` is `None` while the harness window is frontmost, because the
+  live binary is unbundled and `bundleIdentifier` is nil without an `Info.plist`. The scenario
+  therefore pins the synthetic id `dev.pkarpovich.moji.live`. Measured on this machine: activating
+  it on `Russian - Universal` selected `English - Universal` with **0** watchdog releases, so an
+  activation select holds no keys. `moji status` run from the shell does print a real bundle id
+  (`ru.keepcoder.Telegram`), which is what proves `frontmost()` itself.
+- + The configuration also rejects a `cycle` entry that `[layouts]` does not carry, with the same
+  `UnknownTag` error an `apps` entry gets: the barrier would otherwise name a tag the daemon cannot
+  select, and `select` would fail on every tap of the key.
+- + `Daemon::start` gained a `pins` parameter between `layouts` and `hold`.
+- + `moji set <tag>` and `moji toggle` were wired here. Both need nothing but the configuration's
+  tags and `tis::select`, no task of this plan owns them, and Task 8 verifies the CLI surface.
+  `moji status` reads the tag out of the configuration's own names, so a missing or broken
+  configuration prints `-` rather than failing the command.
 
 ### Task 7: LaunchAgent service and upgrade watch
 

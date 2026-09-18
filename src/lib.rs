@@ -5,5 +5,7 @@
 //! binary runs.
 
 pub mod barrier;
+pub mod config;
 pub mod daemon;
 pub mod macos;
+pub mod memory;
