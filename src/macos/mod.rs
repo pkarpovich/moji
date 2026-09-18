@@ -9,4 +9,5 @@ pub mod signals;
 pub mod tap;
 pub mod timer;
 pub mod tis;
+pub mod user;
 pub mod workspace;

@@ -368,11 +368,29 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/service.rs`, `src/executable.rs`
 - Modify: `src/main.rs`
 
-- [ ] `service.rs` from nikki with the `dev.pkarpovich.moji` label, `Layout` under `$HOME`, `install`/`uninstall`, `PathState` keep-alive, bootout -> wait-unloaded -> bootstrap, canonicalized executable path, bundle detection
-- [ ] `executable.rs` from nikki; `moji run` ends the run loop when `swapped` fires, logging that it stops so launchd starts the new version. Since v1 has no tokio, implement the poll as a run-loop timer at the same 2 s interval instead of an async future
-- [ ] `moji install` / `moji uninstall` wired
-- [ ] write tests: the plist names the given program and keeps alive on its path only; an escaped path stays parsable; a bundle path is recognized and a Cellar path is not; the inode watch reports a swapped file and stays quiet on an untouched one
-- [ ] run `mise run check` - must pass before task 8
+- [x] `service.rs` from nikki with the `dev.pkarpovich.moji` label, `Layout` under `$HOME`, `install`/`uninstall`, `PathState` keep-alive, bootout -> wait-unloaded -> bootstrap, canonicalized executable path, bundle detection
+- [x] `executable.rs` from nikki; `moji run` ends the run loop when `swapped` fires, logging that it stops so launchd starts the new version. Since v1 has no tokio, implement the poll as a run-loop timer at the same 2 s interval instead of an async future
+- [x] `moji install` / `moji uninstall` wired
+- [x] write tests: the plist names the given program and keeps alive on its path only; an escaped path stays parsable; a bundle path is recognized and a Cellar path is not; the inode watch reports a swapped file and stays quiet on an untouched one
+- [x] run `mise run check` - must pass before task 8
+- + The agent's `ProgramArguments` carries `run` after the program: nikki's binary is the daemon,
+  moji's is a CLI whose daemon is a subcommand, and a plist naming the bare binary would have
+  launchd respawn a process that prints the subcommand list and exits. A test asserts the argument.
+- + Nikki's `BREW_LABEL` and the brew agent it removes were dropped, along with `Layout.brew_agent`:
+  moji was never installed by `brew services`, so there is nothing to replace. The logs live in
+  `$HOME/Library/Logs/moji/`, the directory Technical Details names, rather than beside the other
+  logs as nikki's do.
+- + `service.rs` is a lib module and holds no `unsafe`, so `getuid` moved to `src/macos/user.rs`,
+  the smallest module that can carry it. `launchctl` addresses the agent as `gui/<uid>/<label>`,
+  which is the only thing that needs the user id.
+- + `executable.rs` exposes `Executable::current()` and `Executable::swapped()` rather than nikki's
+  `async fn swapped`. `identity` and `replaced` are private: the daemon asks the executable, and a
+  pure helper with no caller outside its own tests does not belong in the lib's public surface.
+  The watch is a `Repeat::Every(POLL)` timer installed by `Daemon::run`, dropped when it returns.
+- + `moji install` was not run against launchd from this session: loading an agent that names the
+  debug binary would have launchd respawn a process with no TCC grants. `moji uninstall` was run
+  and is clean on a machine where nothing is loaded (`Boot-out failed: 3: No such process` from
+  launchctl, then a success line). Installing for real is the Post-Completion permissions step.
 
 ### Task 8: Verify acceptance criteria
 

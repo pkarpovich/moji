@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use objc2_core_foundation::CFRunLoop;
 
 use crate::barrier::{Barrier, Decision, KeyEvent, SIGNAL_KEYCODE, Verdict};
+use crate::executable::{self, Executable};
 use crate::macos::signals;
 use crate::macos::tap::{self, Held, Placement, Tap, TapError};
 use crate::macos::timer::{Repeat, Timer, TimerError};
@@ -155,17 +156,24 @@ impl Daemon {
         observer.take();
     }
 
-    /// Runs the main run loop until SIGTERM arrives.
+    /// Runs the main run loop until SIGTERM arrives or the binary is replaced under it.
     ///
     /// # Errors
     ///
-    /// Returns [`StartError::Timer`] when the timer that watches for SIGTERM cannot be installed.
+    /// Returns [`StartError::Timer`] when the timer that watches for SIGTERM, or the one that
+    /// watches the running binary, cannot be installed.
     pub fn run(self) -> Result<(), StartError> {
         signals::watch_for_termination();
         let stopper = Timer::install(Repeat::Every(TERMINATION_POLL), stop_when_terminating)?;
 
+        let executable = Executable::current();
+        let upgrade = Timer::install(Repeat::Every(executable::POLL), move || {
+            stop_when_swapped(executable.as_ref())
+        })?;
+
         CFRunLoop::run();
 
+        drop(upgrade);
         drop(stopper);
         Ok(())
     }
@@ -179,6 +187,23 @@ fn stop_when_terminating() {
         return;
     };
     tracing::info!("SIGTERM arrived, so moji stops and leaves the restart to launchd");
+    run_loop.stop();
+}
+
+fn stop_when_swapped(executable: Option<&Executable>) {
+    let Some(executable) = executable else {
+        return;
+    };
+    if !executable.swapped() {
+        return;
+    }
+    let Some(run_loop) = CFRunLoop::current() else {
+        return;
+    };
+    tracing::info!(
+        path = %executable.path().display(),
+        "the binary was replaced, so moji stops and launchd starts the new version"
+    );
     run_loop.stop();
 }
 

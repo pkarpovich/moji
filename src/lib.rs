@@ -7,5 +7,7 @@
 pub mod barrier;
 pub mod config;
 pub mod daemon;
+pub mod executable;
 pub mod macos;
 pub mod memory;
+pub mod service;

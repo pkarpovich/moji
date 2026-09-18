@@ -8,6 +8,7 @@ use moji::daemon::{self, Daemon};
 use moji::macos::tap;
 use moji::macos::tis::{self, Layout, LayoutTag};
 use moji::macos::workspace;
+use moji::service::{self, Housing, Installed};
 
 const SUBCOMMANDS: &str = "run, set, toggle, status, list, install, uninstall";
 
@@ -104,8 +105,8 @@ fn main() -> ExitCode {
         Command::Toggle(Toggle {}) => toggle(),
         Command::Status(Status {}) => status(),
         Command::List(List {}) => list(),
-        Command::Install(Install {}) => not_implemented("install"),
-        Command::Uninstall(Uninstall {}) => not_implemented("uninstall"),
+        Command::Install(Install {}) => install(),
+        Command::Uninstall(Uninstall {}) => uninstall(),
     }
 }
 
@@ -271,9 +272,55 @@ fn check() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn not_implemented(command: &str) -> ExitCode {
-    tracing::error!(command, "not implemented yet");
-    ExitCode::FAILURE
+fn install() -> ExitCode {
+    let installed = match service::install() {
+        Ok(installed) => installed,
+        Err(error) => {
+            tracing::error!(%error, "moji could not be installed");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let Installed {
+        program,
+        agent,
+        housing,
+    } = installed;
+    tracing::info!(
+        program = %program.display(),
+        agent = %agent.display(),
+        "moji is installed and running"
+    );
+    match housing {
+        Housing::Bundle => tracing::info!(
+            path = %program.display(),
+            "grant Input Monitoring and Accessibility to this application"
+        ),
+        Housing::Loose => tracing::warn!(
+            path = %program.display(),
+            "this binary is not inside an application bundle, so macOS asks for Input Monitoring \
+             and Accessibility again whenever its path changes - install Moji.app instead"
+        ),
+    }
+    ExitCode::SUCCESS
+}
+
+fn uninstall() -> ExitCode {
+    let layout = match service::uninstall() {
+        Ok(layout) => layout,
+        Err(error) => {
+            tracing::error!(%error, "moji could not be uninstalled");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let service::Layout {
+        agent,
+        log: _,
+        errors: _,
+    } = layout;
+    tracing::info!(agent = %agent.display(), "moji is uninstalled");
+    ExitCode::SUCCESS
 }
 
 fn select(layout: &Layout) -> ExitCode {
