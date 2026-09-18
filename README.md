@@ -6,8 +6,10 @@ layouts.
 Switching a layout and typing the next letter normally travel on two unrelated paths, and nothing
 orders them, so letters typed right after a fast switch land in the old layout. moji fixes the
 ordering: Karabiner emits one signal key, F19, moji swallows it, selects the next layout, and holds
-every following keystroke until the change is confirmed - then replays them in order. A watchdog
-releases them after 50 ms regardless, so the keyboard can never hang.
+every following keystroke until the change is confirmed - then replays them in order. The
+confirmation is a notification moji observes in its own process, and every other process learns of
+the switch a few milliseconds later, so the replay waits 10 ms past the confirmation. A watchdog
+releases the keystrokes after 50 ms regardless, so the keyboard can never hang.
 
 It also pins a layout per application and remembers the layout every other application last used.
 

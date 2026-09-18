@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CFRunLoop;
 
-use crate::barrier::{Barrier, Decision, KeyEvent, SIGNAL_KEYCODE, Verdict};
+use crate::barrier::{
+    Barrier, Confirmed, Decision, Elapsed, KeyEvent, SETTLE, SIGNAL_KEYCODE, Verdict,
+};
 use crate::executable::{self, Executable};
 use crate::macos::signals;
 use crate::macos::tap::{self, Held, Placement, Tap, TapError};
@@ -240,7 +242,7 @@ impl State {
         let Some(tag) = select else {
             return verdict;
         };
-        self.arm();
+        self.arm(self.hold);
         self.select(&tag);
         verdict
     }
@@ -249,16 +251,16 @@ impl State {
         let current = self.current_tag();
         self.remember(current.clone());
 
-        let released = {
+        let confirmed = {
             let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
                 return;
             };
-            barrier.confirmed(current)
+            barrier.confirmed(current, Instant::now())
         };
-        if !released {
-            return;
+        match confirmed {
+            Confirmed::Nothing => {}
+            Confirmed::Settling => self.arm(SETTLE),
         }
-        self.release();
     }
 
     fn on_activation(&self, app: BundleId, now: Instant) {
@@ -282,7 +284,7 @@ impl State {
         if !accepted {
             return;
         }
-        self.arm();
+        self.arm(self.hold);
         self.select(&tag);
     }
 
@@ -307,26 +309,27 @@ impl State {
     }
 
     fn on_deadline(&self, now: Instant) {
-        let (waiting, released) = {
+        let (waiting, elapsed) = {
             let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
                 return;
             };
             let waiting = barrier.held();
             (waiting, barrier.tick(now))
         };
-        if !released {
-            if waiting > 0 {
-                self.arm();
-            }
-            return;
-        }
 
-        let Releases { count, last: _ } = self.releases.get();
-        self.releases.set(Releases {
-            count: count + 1,
-            last: waiting,
-        });
-        self.release();
+        match elapsed {
+            Elapsed::Nothing => {}
+            Elapsed::Waiting(left) => self.arm(left),
+            Elapsed::Settled => self.release(),
+            Elapsed::Unconfirmed => {
+                let Releases { count, last: _ } = self.releases.get();
+                self.releases.set(Releases {
+                    count: count + 1,
+                    last: waiting,
+                });
+                self.release();
+            }
+        }
     }
 
     fn select(&self, tag: &LayoutTag) {
@@ -360,11 +363,11 @@ impl State {
         self.held.replay();
     }
 
-    fn arm(&self) {
+    fn arm(&self, after: Duration) {
         let Some(watchdog) = self.watchdog.get() else {
             return;
         };
-        watchdog.arm(self.hold);
+        watchdog.arm(after);
     }
 
     fn disarm(&self) {

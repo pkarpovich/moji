@@ -51,6 +51,15 @@ replays, and it is the only thing a replayed event carries that the captured one
 add `CGEventKeyboardSetUnicodeString`, and do not reach for `UCKeyTranslate`: nothing needs moji to
 know which letter a keycode makes.
 
+That is also why the confirmation alone is not the moment to replay. Since the letter is decided in
+the *receiving* process, and the distributed notification that carries the switch reaches that
+process after it reaches moji, the barrier answers a matching confirmation with `Settling` rather
+than a replay: the held events wait `barrier::SETTLE` (10 ms) longer, and keys arriving inside that
+window queue behind them so the order the user typed in survives. The in-process live harness cannot
+prove this - its window and its observer share moji's process, where the lag is zero by construction
+- so the settle is verified by typing into a real chat window, which is a Post-Completion item of
+the plan.
+
 ## Tests live inline, except the ones that need the main thread
 
 Tests go in a `#[cfg(test)] mod tests` block in the file they cover. A sibling `foo_test.rs` is not

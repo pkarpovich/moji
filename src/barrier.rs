@@ -12,6 +12,15 @@ use crate::macos::tis::LayoutTag;
 /// The virtual keycode of F19, the key Karabiner emits on a tap and moji swallows.
 pub const SIGNAL_KEYCODE: u16 = 80;
 
+/// How long the held events wait after the confirmation before they are replayed.
+///
+/// The confirmation is observed in moji's own process, and the distributed notification that
+/// carries it reaches another process 1-10 ms later. A replayed event is the captured one, so the
+/// receiving application translates its keycode against whatever source it believes is current:
+/// replaying the instant moji learns of the switch types the old layout in an application that has
+/// not learned of it yet.
+pub const SETTLE: Duration = Duration::from_millis(10);
+
 /// Which kind of keyboard event the tap saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
@@ -79,6 +88,28 @@ impl Decision {
     }
 }
 
+/// What the daemon must do with the layout change it just reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirmed {
+    /// Nothing: no switch was waiting for this layout.
+    Nothing,
+    /// The switch arrived; the held events wait [`SETTLE`] longer before they replay.
+    Settling,
+}
+
+/// What the deadline that just passed asks the daemon for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elapsed {
+    /// Nothing is waiting, so nothing is due.
+    Nothing,
+    /// A deadline is still ahead: arm the watchdog again for this long.
+    Waiting(Duration),
+    /// The settle passed: replay the held events into the layout every process now agrees on.
+    Settled,
+    /// No confirmation came in time: release the held events anyway.
+    Unconfirmed,
+}
+
 enum Signal {
     Press,
     Release,
@@ -95,6 +126,10 @@ enum State {
     Selecting {
         expected: LayoutTag,
         deadline: Instant,
+    },
+    Settling {
+        deadline: Instant,
+        held: usize,
     },
 }
 
@@ -128,6 +163,7 @@ impl Barrier {
                 expected: _,
                 deadline: _,
             } => 0,
+            State::Settling { deadline: _, held } => *held,
         }
     }
 
@@ -147,7 +183,8 @@ impl Barrier {
 
     /// Announces a select the daemon makes without a key, and returns whether it may proceed.
     ///
-    /// A key-driven switch owns its window, so this is refused while one is running.
+    /// A key-driven switch owns its window, so this is refused while one is running and while its
+    /// held events are settling.
     pub fn on_select(&mut self, expected: LayoutTag, now: Instant) -> bool {
         match &self.state {
             State::Idle => {}
@@ -160,6 +197,10 @@ impl Barrier {
                 expected: _,
                 deadline: _,
             } => {}
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => return false,
         }
         self.state = State::Selecting {
             expected,
@@ -168,48 +209,58 @@ impl Barrier {
         true
     }
 
-    /// Reports the layout that is selected now, and returns whether the held events must replay.
-    pub fn confirmed(&mut self, now_selected: Option<LayoutTag>) -> bool {
+    /// Reports the layout that is selected now, and returns what the daemon must do about it.
+    ///
+    /// A key-driven switch does not replay on its confirmation: the applications downstream learn
+    /// of the change after moji does, so the held events wait [`SETTLE`] longer.
+    pub fn confirmed(&mut self, now_selected: Option<LayoutTag>, now: Instant) -> Confirmed {
         let Some(now_selected) = now_selected else {
-            return false;
+            return Confirmed::Nothing;
         };
         match &self.state {
-            State::Idle => false,
+            State::Idle => Confirmed::Nothing,
             State::Switching {
                 expected,
                 deadline: _,
-                held: _,
+                held,
             } => {
                 if *expected != now_selected {
-                    return false;
+                    return Confirmed::Nothing;
                 }
-                self.state = State::Idle;
-                true
+                self.state = State::Settling {
+                    deadline: now + SETTLE,
+                    held: *held,
+                };
+                Confirmed::Settling
             }
             State::Selecting {
                 expected,
                 deadline: _,
             } => {
                 if *expected != now_selected {
-                    return false;
+                    return Confirmed::Nothing;
                 }
                 self.state = State::Idle;
-                false
+                Confirmed::Nothing
             }
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => Confirmed::Nothing,
         }
     }
 
-    /// Releases the held events when the deadline has passed, and returns whether it did.
-    pub fn tick(&mut self, now: Instant) -> bool {
+    /// Reports the clock, and returns what the deadline that passed asks for.
+    pub fn tick(&mut self, now: Instant) -> Elapsed {
         match &self.state {
-            State::Idle => false,
+            State::Idle => Elapsed::Nothing,
             State::Switching {
                 expected,
                 deadline,
                 held,
             } => {
                 if now < *deadline {
-                    return false;
+                    return Elapsed::Waiting(deadline.saturating_duration_since(now));
                 }
                 tracing::warn!(
                     expected = %expected,
@@ -217,15 +268,22 @@ impl Barrier {
                     "layout change was not confirmed in time, releasing the held events"
                 );
                 self.state = State::Idle;
-                true
+                Elapsed::Unconfirmed
             }
             State::Selecting { expected, deadline } => {
                 if now < *deadline {
-                    return false;
+                    return Elapsed::Waiting(deadline.saturating_duration_since(now));
                 }
                 tracing::warn!(expected = %expected, "layout change was not confirmed in time");
                 self.state = State::Idle;
-                false
+                Elapsed::Nothing
+            }
+            State::Settling { deadline, held: _ } => {
+                if now < *deadline {
+                    return Elapsed::Waiting(deadline.saturating_duration_since(now));
+                }
+                self.state = State::Idle;
+                Elapsed::Settled
             }
         }
     }
@@ -249,6 +307,10 @@ impl Barrier {
                 self.state = State::Idle;
                 false
             }
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => false,
         }
     }
 
@@ -264,6 +326,10 @@ impl Barrier {
                 expected,
                 deadline: _,
             } => Some(expected.clone()),
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => return Decision::swallow(),
         };
         let Some(next) = next(&self.cycle, from.as_ref()) else {
             return Decision::swallow();
@@ -294,6 +360,10 @@ impl Barrier {
                 expected: _,
                 deadline: _,
             } => Decision::pass(),
+            State::Settling { deadline: _, held } => {
+                *held += 1;
+                Decision::hold()
+            }
         }
     }
 }
@@ -407,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_after_the_signal_are_held_and_the_confirmation_replays_them() {
+    fn keys_after_the_signal_are_held_and_the_settle_after_the_confirmation_replays_them() {
         let mut barrier = barrier();
         let now = Instant::now();
         barrier.on_key(signal_down(), Some(tag("en")), now);
@@ -420,8 +490,88 @@ mod tests {
         }
         assert_eq!(barrier.held(), 3);
 
-        assert!(barrier.confirmed(Some(tag("ru"))));
+        assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Settling);
+        assert_eq!(barrier.held(), 3);
+
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
         assert_eq!(barrier.held(), 0);
+    }
+
+    #[test]
+    fn the_confirmation_does_not_replay_before_the_settle_has_passed() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+
+        barrier.confirmed(Some(tag("ru")), now);
+
+        assert_eq!(
+            barrier.tick(now + Duration::from_millis(9)),
+            Elapsed::Waiting(Duration::from_millis(1))
+        );
+        assert_eq!(barrier.held(), 1);
+    }
+
+    #[test]
+    fn a_key_arriving_during_the_settle_is_held_and_replays_with_the_rest() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        barrier.confirmed(Some(tag("ru")), now);
+
+        let Decision { verdict, select } = barrier.on_key(
+            key(EventKind::Down, 1),
+            Some(tag("ru")),
+            now + Duration::from_millis(5),
+        );
+
+        assert_eq!(verdict, Verdict::Hold);
+        assert_eq!(select, None);
+        assert_eq!(barrier.held(), 2);
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
+    }
+
+    #[test]
+    fn a_second_confirmation_during_the_settle_changes_nothing() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        barrier.confirmed(Some(tag("ru")), now);
+
+        assert_eq!(barrier.confirmed(Some(tag("en")), now), Confirmed::Nothing);
+        assert_eq!(barrier.held(), 1);
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
+    }
+
+    #[test]
+    fn an_activation_select_during_the_settle_is_refused() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        barrier.confirmed(Some(tag("ru")), now);
+
+        assert!(!barrier.on_select(tag("en"), now));
+        assert_eq!(barrier.held(), 1);
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
+    }
+
+    #[test]
+    fn the_signal_key_during_the_settle_is_swallowed_and_not_queued() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        barrier.confirmed(Some(tag("ru")), now);
+
+        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("ru")), now);
+
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(select, None);
+        assert_eq!(barrier.held(), 1);
     }
 
     #[test]
@@ -459,10 +609,13 @@ mod tests {
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 1), Some(tag("en")), now);
 
-        assert!(!barrier.tick(now + Duration::from_millis(49)));
+        assert_eq!(
+            barrier.tick(now + Duration::from_millis(49)),
+            Elapsed::Waiting(Duration::from_millis(1))
+        );
         assert_eq!(barrier.held(), 2);
 
-        assert!(barrier.tick(now + HOLD));
+        assert_eq!(barrier.tick(now + HOLD), Elapsed::Unconfirmed);
         assert_eq!(barrier.held(), 0);
     }
 
@@ -484,10 +637,10 @@ mod tests {
         barrier.on_key(signal_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
-        assert!(!barrier.confirmed(Some(tag("en"))));
+        assert_eq!(barrier.confirmed(Some(tag("en")), now), Confirmed::Nothing);
         assert_eq!(barrier.held(), 1);
 
-        assert!(barrier.tick(now + HOLD));
+        assert_eq!(barrier.tick(now + HOLD), Elapsed::Unconfirmed);
         assert_eq!(barrier.held(), 0);
     }
 
@@ -498,7 +651,7 @@ mod tests {
         barrier.on_key(signal_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
-        assert!(!barrier.confirmed(None));
+        assert_eq!(barrier.confirmed(None, now), Confirmed::Nothing);
         assert_eq!(barrier.held(), 1);
     }
 
@@ -507,8 +660,8 @@ mod tests {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        assert!(!barrier.confirmed(Some(tag("ru"))));
-        assert!(!barrier.tick(now + HOLD));
+        assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Nothing);
+        assert_eq!(barrier.tick(now + HOLD), Elapsed::Nothing);
         assert!(!barrier.select_failed());
     }
 
@@ -548,7 +701,7 @@ mod tests {
         let now = Instant::now();
         barrier.on_select(tag("ru"), now);
 
-        assert!(!barrier.confirmed(Some(tag("ru"))));
+        assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Nothing);
 
         let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now);
         assert_eq!(select, Some(tag("en")));
@@ -563,7 +716,7 @@ mod tests {
 
         assert!(!barrier.on_select(tag("en"), now));
         assert_eq!(barrier.held(), 1);
-        assert!(barrier.confirmed(Some(tag("ru"))));
+        assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Settling);
     }
 
     #[test]
@@ -573,7 +726,10 @@ mod tests {
         barrier.on_select(tag("en"), now);
 
         assert!(barrier.on_select(tag("ru"), now + Duration::from_millis(40)));
-        assert!(!barrier.tick(now + Duration::from_millis(60)));
+        assert_eq!(
+            barrier.tick(now + Duration::from_millis(60)),
+            Elapsed::Waiting(Duration::from_millis(30))
+        );
 
         let Decision { verdict: _, select } = barrier.on_key(
             signal_down(),
@@ -589,7 +745,7 @@ mod tests {
         let now = Instant::now();
         barrier.on_select(tag("en"), now);
 
-        assert!(!barrier.tick(now + HOLD));
+        assert_eq!(barrier.tick(now + HOLD), Elapsed::Nothing);
 
         let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now + HOLD);
         assert_eq!(select, Some(tag("en")));

@@ -153,8 +153,15 @@ pub fn replay(held: Vec<HeldEvent>)
   it once Russian was selected typed `ф`. The receiving application re-translates the keycode
   against the current source and ignores the unicode string the event carries. (b) typed `ф` as
   well and (c), the control, typed what it was told. So replay posts the held copy unchanged, plus
-  the magic user data, and no settle is needed in-process; the cross-process settle stays the
-  manual acceptance scenario in Post-Completion.
+  the magic user data.
+- + Strategy (a) therefore carries the settle this section makes mandatory for it: a matching
+  confirmation moves the barrier to `Settling { deadline: now + SETTLE, held }` instead of
+  releasing, `barrier::SETTLE` is 10 ms, and the daemon re-arms the same watchdog timer for it.
+  Keys arriving inside the settle window are held too, so the replay keeps the order the user typed
+  in, and `Barrier::tick` distinguishes `Settled` (replay, ordinary) from `Unconfirmed` (release,
+  counted in `Releases` and logged at warn). The in-process harness still cannot prove the settle -
+  its lag is zero by construction - so the proof stays the manual chat-window scenario in
+  Post-Completion, which is now written down there.
 - `TapDisabledByTimeout` / `TapDisabledByUserInput` re-enable the tap and log at warn; the callback must stay well under the system's timeout, and the only slow thing it does is one `select` (2-7 ms measured).
 - Permissions: `CGPreflightListenEventAccess` and `CGPreflightPostEventAccess` at startup; when either is missing, call the matching `CGRequest*` once so the system prompt appears, log the exact System Settings pane, and exit non-zero. With `KeepAlive` as `PathState` launchd respawns it until the grant lands, which is a loop of one prompt per respawn; the log line names the pane so the loop is self-explanatory. While moji is not running, F19 is an unbound key and nothing switches: that is the accepted failure mode of moji being the single owner.
 
@@ -437,6 +444,8 @@ The question this task answers, and nothing else: after a layout switch, which o
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
 **Karabiner (environment repository, `karabiner/rules.go`, done last, by hand, with the `go` skill):** `langSwitch()` stops emitting `select_input_source` and drops both the `input_source_if` conditions and the two source-ID constants. The `keyboard_fn` variant emits `f19` in `to` (on press: the globe key does nothing else). The `left_control` and `left_shift` variants keep their `to` modifier and emit `f19` in `to_if_alone`, the Corne one keeping its 180 ms timeout. Update `rules_test.go` and `testdata/karabiner.golden.json`, regenerate with `go run .`; Karabiner reloads the file on its own. Do this only after moji is installed and its permissions are granted, otherwise F19 is a dead key.
+
+**Cross-process replay check (one minute at the Mac, the scenario the whole project exists for):** with moji running, put the cursor in a real chat window - another process, not the live harness - and type a burst starting with the signal key: F19 then five letters, as fast as the keyboard allows. All five must land in the new layout. This is the only thing that exercises the 10 ms settle (`barrier::SETTLE`): the harness's window, tap and observer share moji's process, so the cross-process lag the settle covers is zero there. If letters still land in the old layout, the settle is too short for this machine rather than wrong - raise `SETTLE` and repeat; if the first letter is duplicated or out of order, that is the replay and not the settle.
 
 **Live Tuna check (one minute at the Mac):** run `moji status` in a loop or the `front` probe while opening Tuna. If Tuna's bundle id shows up as frontmost, the per-app pin works as designed. If it never does, the activation signal for `LSUIElement` panels needs an AX focused-window observer; that is a follow-up plan, not a patch.
 
