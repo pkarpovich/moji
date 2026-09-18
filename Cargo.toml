@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 argh = "0.1.19"
 block2 = { version = "0.6", default-features = false, features = ["std"] }
+libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSText", "NSTextView", "NSGraphics", "NSEvent"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFString", "CFArray", "CFDictionary", "CFNumber", "CFBase", "CFDate", "CFMachPort"] }

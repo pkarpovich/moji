@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use argh::FromArgs;
-use moji::macos::tis::{self, Layout};
+use moji::daemon::{self, Daemon};
+use moji::macos::tap;
+use moji::macos::tis::{self, Layout, LayoutTag};
 
 const SUBCOMMANDS: &str = "run, set, toggle, status, list, install, uninstall";
 
@@ -93,13 +96,69 @@ fn main() -> ExitCode {
     };
 
     match command {
-        Command::Run(Run {}) => not_implemented("run"),
+        Command::Run(Run {}) => run(),
         Command::Set(Set { tag }) => not_implemented(&format!("set {tag}")),
         Command::Toggle(Toggle {}) => not_implemented("toggle"),
         Command::Status(Status {}) => status(),
         Command::List(List {}) => list(),
         Command::Install(Install {}) => not_implemented("install"),
         Command::Uninstall(Uninstall {}) => not_implemented("uninstall"),
+    }
+}
+
+fn run() -> ExitCode {
+    let missing = tap::request_missing_access();
+    if !missing.is_empty() {
+        for access in missing {
+            tracing::error!(
+                pane = access.pane(),
+                "moji cannot run without this grant; launchd will start it again once it is given"
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let layouts = tis::enabled_layouts();
+    if layouts.len() < 2 {
+        tracing::error!("moji needs at least two enabled keyboard layouts to switch between");
+        return ExitCode::FAILURE;
+    }
+
+    let mut cycle = Vec::new();
+    let mut tagged = BTreeMap::new();
+    let mut names = Vec::new();
+    for layout in layouts {
+        let Layout {
+            name,
+            id: _,
+            language: _,
+        } = &layout;
+        let tag = LayoutTag(name.clone());
+        names.push(name.clone());
+        cycle.push(tag.clone());
+        tagged.insert(tag, layout);
+    }
+    tracing::warn!("moji has no configuration yet, so it cycles through every enabled layout");
+
+    let daemon = match Daemon::start(cycle, tagged, daemon::HOLD) {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            tracing::error!(%error, "moji could not install its run loop sources");
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        layouts = names.join(", "),
+        "moji is running"
+    );
+
+    match daemon.run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(%error, "moji stopped because its run loop could not be watched");
+            ExitCode::FAILURE
+        }
     }
 }
 

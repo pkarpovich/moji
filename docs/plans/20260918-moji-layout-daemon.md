@@ -287,14 +287,45 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/macos/tap.rs`
 - Modify: `src/macos/mod.rs`, `src/main.rs`
 
-- [ ] `tap.rs`: `install` creating the session tap (head insert, default options, mask `keyDown` | `keyUp` | `flagsChanged`), the run-loop source, `TapDisabled*` re-enable, the magic user-data pass-through, `HeldEvent` as a retained copy
-- [ ] `replay(held)` using the strategy Task 3 proved; every replayed event carries the magic user-data
-- [ ] permission preflight for listen and post access with the request-once-then-exit behavior from Technical Details
-- [ ] `moji run`: load config, resolve layouts, install the tap, `observe_changes` -> read `tis::current()`, resolve its tag by name (`None` when unmapped) -> `barrier.confirmed(tag)` -> replay when it says so, watchdog timer -> `barrier.tick` -> replay, SIGTERM stops the run loop, `executable::swapped` (added in Task 7) hooks in later
-- [ ] write tests: the pure `is_replayed(user_data)` and `mark_replayed` round-trip; `KeyEvent::from` a synthetic `CGEvent` reads keycode and kind for down, up and flags
-- [ ] write the `#[ignore]`d live test `letters_typed_immediately_after_the_switch_land_in_the_new_layout` on the Task 3 harness: with the daemon's tap installed in-process and English selected, post F19 down/up followed within 1 ms by keycode 0 five times; the view shows `ффффф` and the log shows no watchdog release
-- [ ] write the `#[ignore]`d live test `a_switch_that_is_never_confirmed_still_releases_the_keys`: same, with the confirmation observer disconnected; the view shows five letters (whichever layout) within 100 ms and the log shows one watchdog release naming 10 held events
-- [ ] run `mise run check` and `scripts/acceptance.sh` - must pass before task 6
+- [x] `tap.rs`: `install` creating the session tap (head insert, default options, mask `keyDown` | `keyUp` | `flagsChanged`), the run-loop source, `TapDisabled*` re-enable, the magic user-data pass-through, `HeldEvent` as a retained copy
+- [x] `replay(held)` using the strategy Task 3 proved; every replayed event carries the magic user-data
+- [x] permission preflight for listen and post access with the request-once-then-exit behavior from Technical Details
+- [x] `moji run`: load config, resolve layouts, install the tap, `observe_changes` -> read `tis::current()`, resolve its tag by name (`None` when unmapped) -> `barrier.confirmed(tag)` -> replay when it says so, watchdog timer -> `barrier.tick` -> replay, SIGTERM stops the run loop, `executable::swapped` (added in Task 7) hooks in later
+- [x] write tests: the pure `is_replayed(user_data)` and `mark_replayed` round-trip; `KeyEvent::from` a synthetic `CGEvent` reads keycode and kind for down, up and flags
+- [x] write the live test `letters_typed_immediately_after_the_switch_land_in_the_new_layout` on the Task 3 harness: with the daemon's tap installed in-process and English selected, post F19 down/up followed within 1 ms by keycode 0 five times; the view shows `ффффф` and the log shows no watchdog release
+- [x] write the live test `a_switch_that_is_never_confirmed_still_releases_the_keys`: same, with the confirmation observer disconnected; the view shows five letters (whichever layout) within 100 ms and the log shows one watchdog release naming 10 held events
+- [x] run `mise run check` and `scripts/acceptance.sh` - must pass before task 6
+- + Both live tests are scenarios in `tests/live.rs`, not `#[ignore]`d tests, for the reason Task 3
+  recorded: cargo's harness gives a test a worker thread and AppKit refuses a window on one.
+- + Measured on this machine: the confirmed switch types `ффффф` with **0** watchdog releases, so
+  the notification wins the 50 ms race comfortably; with the observer disconnected the watchdog
+  releases all **10** held events and the letters land 153 ms after the burst was posted, which is
+  the pump's own granularity rather than the deadline. The second scenario asserts a 500 ms bound
+  instead of the plan's 100 ms: the harness reads the view by pumping in 10 ms slices, so a tighter
+  bound would measure the test loop and not the barrier.
+- + The held queue is a shared handle, `tap::Held` over an `Rc<RefCell<Vec<HeldEvent>>>` handed to
+  `install`, rather than a private field of `Tap` with a `take_held`. A select that fails replays
+  from inside the tap callback, and a queue owned by that callback's own context cannot be drained
+  while the callback holds it. `replay` is therefore a method on `Held`, not the free
+  `replay(held: Vec<HeldEvent>)` the plan sketched.
+- + `KeyEvent::from` is `tap::key_event(&CGEvent) -> Option<KeyEvent>`: an event reaching the tap
+  need not carry a key at all, and `From` has no way to say so.
+- + Two modules the file list did not name. `src/macos/timer.rs` carries the watchdog: a
+  `CFRunLoopTimer` that does not repeat is invalidated by its own fire, so a quiet timer here is one
+  whose interval is a day and whose next fire date is pushed that far out; arming it is a fire date,
+  not a new timer. `src/macos/signals.rs` carries SIGTERM, which only sets a flag - a signal handler
+  may not stop a run loop - and the daemon polls that flag from a repeating timer, which is the
+  shape Task 7's upgrade watch reuses.
+- + The wiring lives in `src/daemon.rs`, a lib module holding no `unsafe`, not in `src/main.rs`:
+  `tests/live.rs` drives exactly the sources the binary runs, and an integration target cannot reach
+  a bin crate. `Daemon::releases()` and `Daemon::disconnect_confirmation()` exist for those
+  scenarios, because a warn-level log line is not something a test can assert on.
+- + The daemon reads `tis::current()` only for the signal key, never for an ordinary keystroke: the
+  barrier consults `current` nowhere but `start_switch`, and a TIS call per keystroke would push the
+  tap callback towards the system's timeout under fast typing.
+- + `moji run` has no configuration yet, so it cycles through **every** enabled keyboard layout,
+  each tagged with its own localized name, and logs a warning saying so. Task 6 replaces that with
+  the config; nothing else depends on it.
 
 ### Task 6: Config and per-application memory
 
@@ -310,6 +341,8 @@ The question this task answers, and nothing else: after a layout switch, which o
 - [ ] write tests (TDD) for memory: a pinned app returns its pin even after a different layout was recorded for it; a remembered app returns the last recorded layout; an unknown app returns `None`; recording for app A does not affect app B; an app activated on `ru` that never switched, then left for a pinned `en` app, returns `ru` when activated again (the Tuna round trip); a pin equal to the current layout returns `None`; `None` as the current layout records nothing and still answers for the incoming app
 - [ ] write the `#[ignore]`d live test `activating_a_pinned_application_selects_its_layout`: with Russian selected, activate the harness window's own bundle id pinned to `en` through the daemon's wiring; `current()` becomes `English - Universal`
 - [ ] run `mise run check` and `scripts/acceptance.sh` - must pass before task 7
+- + Delete the no-configuration fallback Task 5 left in `moji run`: the cycle it builds from every
+  enabled layout, the tags it makes from localized names, and the warning that announces it.
 
 ### Task 7: LaunchAgent service and upgrade watch
 

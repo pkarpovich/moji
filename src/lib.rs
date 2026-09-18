@@ -5,4 +5,5 @@
 //! binary runs.
 
 pub mod barrier;
+pub mod daemon;
 pub mod macos;

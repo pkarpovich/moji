@@ -9,17 +9,22 @@
 //! The terminal that runs these needs Input Monitoring and Accessibility, because TCC attributes
 //! the tap and the posted events to the process responsible for this one.
 
+use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use moji::barrier::SIGNAL_KEYCODE;
+use moji::daemon::{Daemon, Releases};
 use moji::macos::harness::{self, KEYCODE_A, Stroke, Window};
-use moji::macos::tis::{self, Layout};
+use moji::macos::tis::{self, Layout, LayoutTag};
 
 const ENGLISH: &str = "English - Universal";
 const RUSSIAN: &str = "Russian - Universal";
 const RUSSIAN_A: &str = "ф";
 const SETTLE: Duration = Duration::from_millis(500);
+const HOLD: Duration = Duration::from_millis(50);
+const BURST: usize = 5;
 
 const SCENARIOS: &[(&str, fn())] = &[
     (
@@ -29,6 +34,14 @@ const SCENARIOS: &[(&str, fn())] = &[
     (
         "an_untouched_view_is_empty_and_a_set_string_reads_back",
         an_untouched_view_is_empty_and_a_set_string_reads_back,
+    ),
+    (
+        "letters_typed_immediately_after_the_switch_land_in_the_new_layout",
+        letters_typed_immediately_after_the_switch_land_in_the_new_layout,
+    ),
+    (
+        "a_switch_that_is_never_confirmed_still_releases_the_keys",
+        a_switch_that_is_never_confirmed_still_releases_the_keys,
     ),
 ];
 
@@ -198,6 +211,115 @@ fn a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_capture
     assert!(
         replayed == RUSSIAN_A || fresh == RUSSIAN_A,
         "neither (a) nor (b) typed {RUSSIAN_A} after the switch: (a) typed {replayed:?}, (b) typed {fresh:?}"
+    );
+}
+
+fn start_daemon(english: &Layout, russian: &Layout) -> Daemon {
+    let english_tag = LayoutTag("en".to_string());
+    let russian_tag = LayoutTag("ru".to_string());
+
+    let mut layouts = BTreeMap::new();
+    layouts.insert(english_tag.clone(), english.clone());
+    layouts.insert(russian_tag.clone(), russian.clone());
+    let cycle = vec![english_tag, russian_tag];
+
+    let Ok(daemon) = Daemon::start(cycle, layouts, HOLD) else {
+        panic!(
+            "the daemon could not install its tap: is Input Monitoring granted to this terminal?"
+        );
+    };
+    daemon
+}
+
+fn post_switch_and_burst() {
+    harness::post_key(SIGNAL_KEYCODE, Stroke::Down);
+    harness::post_key(SIGNAL_KEYCODE, Stroke::Up);
+    for _ in 0..BURST {
+        harness::post_key(KEYCODE_A, Stroke::Down);
+        harness::post_key(KEYCODE_A, Stroke::Up);
+    }
+}
+
+fn wait_for_length(window: &Window, length: usize, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let typed = window.typed_text();
+        if typed.chars().count() >= length {
+            return typed;
+        }
+        if Instant::now() >= deadline {
+            return typed;
+        }
+        window.pump(Duration::from_millis(10));
+    }
+}
+
+fn letters_typed_immediately_after_the_switch_land_in_the_new_layout() {
+    let english = layout_named(ENGLISH);
+    let russian = layout_named(RUSSIAN);
+
+    let window = Window::open();
+    select_and_wait(&window, &english);
+
+    let daemon = start_daemon(&english, &russian);
+    window.clear();
+    post_switch_and_burst();
+
+    let typed = wait_for_length(&window, BURST, SETTLE * 4);
+    let Releases { count, last } = daemon.releases();
+    drop(daemon);
+
+    println!("live: the window shows {typed:?} after {count} watchdog releases");
+    assert_eq!(
+        typed,
+        RUSSIAN_A.repeat(BURST),
+        "the letters typed right after the switch did not land in {RUSSIAN}"
+    );
+    assert_eq!(
+        count, 0,
+        "the watchdog released {last} events, so the confirmation lost the race it should win"
+    );
+}
+
+fn a_switch_that_is_never_confirmed_still_releases_the_keys() {
+    let english = layout_named(ENGLISH);
+    let russian = layout_named(RUSSIAN);
+
+    let window = Window::open();
+    select_and_wait(&window, &english);
+
+    let mut daemon = start_daemon(&english, &russian);
+    daemon.disconnect_confirmation();
+    window.clear();
+
+    let started = Instant::now();
+    post_switch_and_burst();
+    let typed = wait_for_length(&window, BURST, SETTLE * 4);
+    let waited = started.elapsed();
+    let Releases { count, last } = daemon.releases();
+    drop(daemon);
+
+    println!(
+        "live: the window shows {typed:?} after {waited:?}, released by the watchdog {count} time(s)"
+    );
+    assert_eq!(
+        typed.chars().count(),
+        BURST,
+        "the keys held by a switch nobody confirmed never came out: the window shows {typed:?}"
+    );
+    assert_eq!(
+        count, 1,
+        "the watchdog released the held keys {count} times"
+    );
+    assert_eq!(
+        last,
+        BURST * 2,
+        "the watchdog released {last} events, not the {} it was holding",
+        BURST * 2
+    );
+    assert!(
+        waited < Duration::from_millis(500),
+        "the keyboard was stuck for {waited:?}, which is far past the {HOLD:?} deadline"
     );
 }
 

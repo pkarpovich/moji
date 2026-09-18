@@ -11,6 +11,8 @@ IDENTIFIER="dev.pkarpovich.moji"
 LIVE_TESTS=(
 	a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_captured
 	an_untouched_view_is_empty_and_a_set_string_reads_back
+	letters_typed_immediately_after_the_switch_land_in_the_new_layout
+	a_switch_that_is_never_confirmed_still_releases_the_keys
 )
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
