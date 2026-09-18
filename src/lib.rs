@@ -4,4 +4,5 @@
 //! because AppKit refuses an `NSWindow` anywhere else, drives exactly the modules the `moji`
 //! binary runs.
 
+pub mod barrier;
 pub mod macos;

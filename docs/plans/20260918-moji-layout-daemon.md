@@ -257,12 +257,29 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/barrier.rs`
 - Modify: `src/main.rs`
 
-- [ ] types: `LayoutTag(String)`, `KeyEvent`, `Verdict { Pass, Swallow, Hold }`, `Decision { verdict, select: Option<LayoutTag>, replay: bool }`, `Barrier::new(cycle: Vec<LayoutTag>, hold: Duration)`
-- [ ] `on_key(&mut self, event: KeyEvent, current: Option<LayoutTag>, now: Instant) -> Decision` implementing the state table from Technical Details, including the second-tap-inside-the-window rule and the F19-during-`Selecting` rule
-- [ ] `on_select(&mut self, expected: LayoutTag, now: Instant) -> bool` per the state table; `confirmed(&mut self, now_selected: Option<LayoutTag>) -> bool` and `tick(&mut self, now: Instant) -> bool` returning whether the caller must replay; `select_failed(&mut self) -> bool`
-- [ ] `next(cycle, current: Option<&LayoutTag>)` wrapping, with a current layout outside the cycle or unmapped (`None`) going to the first entry
-- [ ] write tests (TDD): F19 in idle swallows and selects the next tag; keys after F19 are held in order; confirmation replays exactly the held keys; the deadline replays and reports the count; a second F19 during the window is swallowed and not queued; keys in idle pass; flags events are held like keys; a select failure replays at once; a confirmation naming a different tag than the one requested does not replay and the deadline still fires; an activation select (`on_select`) never holds keys; F19 during an activation select starts a real switch and holds; a confirmation of an activation select replays nothing; `on_select` during a key-driven switch is refused and the held keys survive; `on_select` during `Selecting` replaces the target and re-arms the deadline; the `Selecting` deadline returns to idle with nothing to replay; a `None` confirmation never matches; `confirmed`, `tick` and `select_failed` in idle replay nothing; cycle wraps; a layout outside the cycle goes to the first entry; an unmapped current layout (`None`) goes to the first entry
-- [ ] run `mise run check` - must pass before task 5
+- [x] types: `LayoutTag(String)`, `KeyEvent`, `Verdict { Pass, Swallow, Hold }`, `Decision { verdict, select: Option<LayoutTag>, replay: bool }`, `Barrier::new(cycle: Vec<LayoutTag>, hold: Duration)`
+- [x] `on_key(&mut self, event: KeyEvent, current: Option<LayoutTag>, now: Instant) -> Decision` implementing the state table from Technical Details, including the second-tap-inside-the-window rule and the F19-during-`Selecting` rule
+- [x] `on_select(&mut self, expected: LayoutTag, now: Instant) -> bool` per the state table; `confirmed(&mut self, now_selected: Option<LayoutTag>) -> bool` and `tick(&mut self, now: Instant) -> bool` returning whether the caller must replay; `select_failed(&mut self) -> bool`
+- [x] `next(cycle, current: Option<&LayoutTag>)` wrapping, with a current layout outside the cycle or unmapped (`None`) going to the first entry
+- [x] write tests (TDD): F19 in idle swallows and selects the next tag; keys after F19 are held in order; confirmation replays exactly the held keys; the deadline replays and reports the count; a second F19 during the window is swallowed and not queued; keys in idle pass; flags events are held like keys; a select failure replays at once; a confirmation naming a different tag than the one requested does not replay and the deadline still fires; an activation select (`on_select`) never holds keys; F19 during an activation select starts a real switch and holds; a confirmation of an activation select replays nothing; `on_select` during a key-driven switch is refused and the held keys survive; `on_select` during `Selecting` replaces the target and re-arms the deadline; the `Selecting` deadline returns to idle with nothing to replay; a `None` confirmation never matches; `confirmed`, `tick` and `select_failed` in idle replay nothing; cycle wraps; a layout outside the cycle goes to the first entry; an unmapped current layout (`None`) goes to the first entry
+- [x] run `mise run check` - must pass before task 5
+- + `LayoutTag` was not redeclared: Task 2 already put it in `tis.rs` and `barrier.rs` imports it from
+  there, as that task's `+` note said it would.
+- + The module is declared in `src/lib.rs`, not in `src/main.rs`: since Task 3 the bin is a thin
+  shell over the lib, and `tests/live.rs` reaches the barrier only through the lib. `main.rs` is
+  therefore unchanged by this task - the barrier is wired into `moji run` in Task 5.
+- + `next` returns `Option<LayoutTag>`, not `LayoutTag`: an empty cycle has no next layout, and the
+  daemon must never panic on one. F19 against an empty cycle is swallowed with `select: None`, so
+  the key stays dead rather than taking the process down. The config rejects such a cycle (Task 6);
+  this is the barrier refusing to depend on that.
+- + `Barrier::held()` reports how many events wait for a replay. The state table hides the count
+  inside `Switching`, and the deadline is required to name it, so the tests need a way to read it
+  that is not the log line.
+- + A `flagsChanged` event carrying keycode 80 is ordinary input, not the signal: only `Down` and
+  `Up` on `SIGNAL_KEYCODE` (a `pub const` in `barrier.rs`) drive the state machine. F19 is not a
+  modifier, so such an event is not something Karabiner emits.
+- + `next` uses `cycle.first()?` rather than `let ... else`: clippy's `question_mark` lint is denied
+  by the gate and fires on the `let ... else` form the style skill prefers.
 
 ### Task 5: Tap layer and the barrier wired into `moji run`
 
