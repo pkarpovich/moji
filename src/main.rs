@@ -1,10 +1,7 @@
-mod macos;
-
 use std::process::ExitCode;
 
 use argh::FromArgs;
-
-use crate::macos::tis::{self, Layout};
+use moji::macos::tis::{self, Layout};
 
 const SUBCOMMANDS: &str = "run, set, toggle, status, list, install, uninstall";
 

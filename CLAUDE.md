@@ -31,23 +31,33 @@ every TIS call are sources on the main thread's `CFRunLoop`.
 `src/macos/` layer executes. The barrier never holds a Core Foundation object and the tap layer owns
 the queue of held events. That split is what makes the ordering testable with a fake clock.
 
-## Tests live inline
+## Tests live inline, except the ones that need the main thread
 
 Tests go in a `#[cfg(test)] mod tests` block in the file they cover. A sibling `foo_test.rs` is not
 compiled unless something declares it, so it would sit unbuilt while the gate reported success.
 
-A test that needs the live machine - a real tap, a real layout switch - is `#[ignore]`d with a
-reason, and `scripts/acceptance.sh` runs it with `-- --ignored`. `cargo test` must stay reproducible
-on a machine where nothing in particular is open.
+A test that needs the live machine - a real window, a real tap, a real layout switch - lives in
+`tests/live.rs`, which is declared in `Cargo.toml` with `harness = false` and owns `main`. Cargo's
+own test harness runs every test on a worker thread even with `--test-threads=1`, and AppKit aborts
+the process when an `NSWindow` is created or the event queue is pumped anywhere but the main thread,
+so a live test cannot be an `#[ignore]`d `#[test]`. Each scenario is a function named in the
+`SCENARIOS` table there, and `main` runs only the scenario named on the command line;
+`scripts/acceptance.sh` names them one at a time and greps `live: <name> passed`. A plain
+`cargo test` runs the target with no name, so it prints one line and does nothing: `cargo test` must
+stay reproducible on a machine where nothing in particular is open.
 
-The live tests run inside cargo's test binary, and TCC attributes an event tap to the responsible
-process: the terminal running `scripts/acceptance.sh`. That terminal needs Input Monitoring and
-Accessibility once. The installed daemon's own grant goes to `Moji.app` and is separate.
+That split is why the crate has both a lib (`src/lib.rs`) and a bin (`src/main.rs`): an integration
+target cannot reach a bin crate, nor a `#[cfg(test)]` item. Anything a live test drives is a plain
+`pub` module of the lib.
+
+TCC attributes an event tap and a posted event to the responsible process: the terminal running
+`scripts/acceptance.sh`. That terminal needs Input Monitoring and Accessibility once. The installed
+daemon's own grant goes to `Moji.app` and is separate.
 
 ## Declare every module
 
 Every new module file is declared the moment it is created - `mod x;` in its parent `mod.rs` or in
-`main.rs`. An undeclared module is not compiled, and neither are its inline tests.
+`lib.rs`. An undeclared module is not compiled, and neither are its inline tests.
 
 No module carries a blanket `#[allow(dead_code)]`: it is what the compiler uses to report a helper
 that was written and never wired up. An item that exists only for tests is `#[cfg(test)]`, and a

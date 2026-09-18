@@ -6,8 +6,12 @@ IDENTIFIER="dev.pkarpovich.moji"
 # Every live test below installs an event tap or switches the layout, and TCC attributes both to the
 # process responsible for this script - the terminal running it. That terminal needs Input
 # Monitoring and Accessibility once, or these tests fail for a reason that has nothing to do with
-# the code.
-LIVE_TESTS=()
+# the code. They live in the `live` target rather than in cargo's test harness because AppKit
+# refuses a window on anything but the main thread, which that harness never gives a test.
+LIVE_TESTS=(
+	a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_captured
+	an_untouched_view_is_empty_and_a_set_string_reads_back
+)
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -47,9 +51,9 @@ if [ ${#LIVE_TESTS[@]} -eq 0 ]; then
 else
 	for name in "${LIVE_TESTS[@]}"; do
 		echo "acceptance: $name"
-		output="$(cargo test --bin moji -- --ignored --nocapture "$name" 2>&1 || true)"
+		output="$(cargo test --test live -- "$name" 2>&1 || true)"
 		echo "$output"
-		if ! echo "$output" | grep -q 'result: ok\. 1 passed'; then
+		if ! echo "$output" | grep -q "^live: $name passed$"; then
 			echo "acceptance: $name neither ran nor passed" >&2
 			exit 1
 		fi

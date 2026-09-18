@@ -169,13 +169,6 @@ pub fn current() -> Option<Layout> {
 ///
 /// Returns [`TisError::NotEnabled`] when no enabled layout carries the name, and
 /// [`TisError::Refused`] when `TISSelectInputSource` returns a non-zero `OSStatus`.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "moji set and moji run select layouts from Task 5 on"
-    )
-)]
 pub fn select(layout: &Layout) -> Result<(), TisError> {
     let Layout {
         name,
@@ -196,10 +189,6 @@ pub fn select(layout: &Layout) -> Result<(), TisError> {
 }
 
 /// Calls `on_change` on the main run loop whenever the selected keyboard layout changes.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "moji run installs the observer in Task 5")
-)]
 pub fn observe_changes(on_change: impl Fn() + 'static) -> ChangeObserver {
     let center = NSDistributedNotificationCenter::defaultCenter();
     center.setSuspended(false);
@@ -219,10 +208,6 @@ pub fn observe_changes(on_change: impl Fn() + 'static) -> ChangeObserver {
 ///
 /// Returns [`ResolveError::Duplicate`] when several tags name one layout, and
 /// [`ResolveError::Unresolved`] naming every tag whose layout is not enabled.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the configuration resolves its tags in Task 6")
-)]
 pub fn resolve(
     names: &BTreeMap<LayoutTag, String>,
     layouts: &[Layout],

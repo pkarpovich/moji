@@ -4,4 +4,5 @@
 //! safe type. Text Input Sources is documented as main-thread-only, so everything here runs on the
 //! main thread's run loop.
 
+pub mod harness;
 pub mod tis;
