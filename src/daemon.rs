@@ -86,6 +86,8 @@ impl Daemon {
             hold,
         });
 
+        state.seed_frontmost();
+
         let watching = Rc::downgrade(&state);
         let watchdog = Timer::install(Repeat::Never, move || {
             let Some(state) = watching.upgrade() else {
@@ -233,15 +235,8 @@ impl State {
             };
             barrier.on_key(event, current, now)
         };
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = decision;
+        let Decision { verdict, select } = decision;
 
-        if replay {
-            self.release();
-        }
         let Some(tag) = select else {
             return verdict;
         };
@@ -291,6 +286,16 @@ impl State {
         self.select(&tag);
     }
 
+    fn seed_frontmost(&self) {
+        let Some(app) = workspace::frontmost() else {
+            return;
+        };
+        let Ok(mut memory) = self.memory.try_borrow_mut() else {
+            return;
+        };
+        memory.seed(app);
+    }
+
     fn remember(&self, current: Option<LayoutTag>) {
         let Some(app) = workspace::frontmost() else {
             return;
@@ -310,6 +315,9 @@ impl State {
             (waiting, barrier.tick(now))
         };
         if !released {
+            if waiting > 0 {
+                self.arm();
+            }
             return;
         }
 
@@ -383,7 +391,8 @@ impl State {
     }
 }
 
-fn tag_named(layouts: &BTreeMap<LayoutTag, Layout>, name: &str) -> Option<LayoutTag> {
+/// Returns the tag under which `layouts` carries the layout with this localized name.
+pub fn tag_named(layouts: &BTreeMap<LayoutTag, Layout>, name: &str) -> Option<LayoutTag> {
     for (tag, layout) in layouts {
         let Layout {
             name: candidate,

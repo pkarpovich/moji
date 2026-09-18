@@ -54,8 +54,6 @@ pub struct Decision {
     pub verdict: Verdict,
     /// The layout to select, when the event started a switch.
     pub select: Option<LayoutTag>,
-    /// Whether the held events must be replayed now.
-    pub replay: bool,
 }
 
 impl Decision {
@@ -63,7 +61,6 @@ impl Decision {
         Decision {
             verdict: Verdict::Pass,
             select: None,
-            replay: false,
         }
     }
 
@@ -71,7 +68,6 @@ impl Decision {
         Decision {
             verdict: Verdict::Swallow,
             select: None,
-            replay: false,
         }
     }
 
@@ -79,7 +75,6 @@ impl Decision {
         Decision {
             verdict: Verdict::Hold,
             select: None,
-            replay: false,
         }
     }
 }
@@ -281,7 +276,6 @@ impl Barrier {
         Decision {
             verdict: Verdict::Swallow,
             select: Some(next),
-            replay: false,
         }
     }
 
@@ -382,15 +376,10 @@ mod tests {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(signal_down(), Some(tag("en")), now);
+        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(select, Some(tag("ru")));
-        assert!(!replay);
     }
 
     #[test]
@@ -398,15 +387,10 @@ mod tests {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(signal_up(), Some(tag("en")), now);
+        let Decision { verdict, select } = barrier.on_key(signal_up(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(select, None);
-        assert!(!replay);
     }
 
     #[test]
@@ -414,15 +398,11 @@ mod tests {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        let Decision { verdict, select } =
+            barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Pass);
         assert_eq!(select, None);
-        assert!(!replay);
         assert_eq!(barrier.held(), 0);
     }
 
@@ -433,14 +413,10 @@ mod tests {
         barrier.on_key(signal_down(), Some(tag("en")), now);
 
         for keycode in [0u16, 1, 2] {
-            let Decision {
-                verdict,
-                select,
-                replay,
-            } = barrier.on_key(key(EventKind::Down, keycode), Some(tag("en")), now);
+            let Decision { verdict, select } =
+                barrier.on_key(key(EventKind::Down, keycode), Some(tag("en")), now);
             assert_eq!(verdict, Verdict::Hold);
             assert_eq!(select, None);
-            assert!(!replay);
         }
         assert_eq!(barrier.held(), 3);
 
@@ -454,11 +430,8 @@ mod tests {
         let now = Instant::now();
         barrier.on_key(signal_down(), Some(tag("en")), now);
 
-        let Decision {
-            verdict,
-            select: _,
-            replay: _,
-        } = barrier.on_key(key(EventKind::Flags, 56), Some(tag("en")), now);
+        let Decision { verdict, select: _ } =
+            barrier.on_key(key(EventKind::Flags, 56), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Hold);
         assert_eq!(barrier.held(), 1);
@@ -471,15 +444,10 @@ mod tests {
         barrier.on_key(signal_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(signal_down(), Some(tag("en")), now);
+        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(select, None);
-        assert!(!replay);
         assert_eq!(barrier.held(), 1);
     }
 
@@ -551,14 +519,10 @@ mod tests {
 
         assert!(barrier.on_select(tag("en"), now));
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
+        let Decision { verdict, select } =
+            barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
         assert_eq!(verdict, Verdict::Pass);
         assert_eq!(select, None);
-        assert!(!replay);
         assert_eq!(barrier.held(), 0);
     }
 
@@ -568,20 +532,12 @@ mod tests {
         let now = Instant::now();
         barrier.on_select(tag("en"), now);
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(signal_down(), Some(tag("ru")), now);
+        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("ru")), now);
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(select, Some(tag("ru")));
-        assert!(!replay);
 
-        let Decision {
-            verdict,
-            select: _,
-            replay: _,
-        } = barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
+        let Decision { verdict, select: _ } =
+            barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
         assert_eq!(verdict, Verdict::Hold);
         assert_eq!(barrier.held(), 1);
     }
@@ -594,11 +550,7 @@ mod tests {
 
         assert!(!barrier.confirmed(Some(tag("ru"))));
 
-        let Decision {
-            verdict: _,
-            select,
-            replay: _,
-        } = barrier.on_key(signal_down(), None, now);
+        let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now);
         assert_eq!(select, Some(tag("en")));
     }
 
@@ -623,11 +575,7 @@ mod tests {
         assert!(barrier.on_select(tag("ru"), now + Duration::from_millis(40)));
         assert!(!barrier.tick(now + Duration::from_millis(60)));
 
-        let Decision {
-            verdict: _,
-            select,
-            replay: _,
-        } = barrier.on_key(
+        let Decision { verdict: _, select } = barrier.on_key(
             signal_down(),
             Some(tag("en")),
             now + Duration::from_millis(60),
@@ -643,11 +591,7 @@ mod tests {
 
         assert!(!barrier.tick(now + HOLD));
 
-        let Decision {
-            verdict: _,
-            select,
-            replay: _,
-        } = barrier.on_key(signal_down(), None, now + HOLD);
+        let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now + HOLD);
         assert_eq!(select, Some(tag("en")));
     }
 
@@ -659,11 +603,7 @@ mod tests {
 
         assert!(!barrier.select_failed());
 
-        let Decision {
-            verdict: _,
-            select,
-            replay: _,
-        } = barrier.on_key(signal_down(), None, now);
+        let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now);
         assert_eq!(select, Some(tag("en")));
     }
 
@@ -697,20 +637,11 @@ mod tests {
         let mut barrier = Barrier::new(Vec::new(), HOLD);
         let now = Instant::now();
 
-        let Decision {
-            verdict,
-            select,
-            replay,
-        } = barrier.on_key(signal_down(), Some(tag("en")), now);
+        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("en")), now);
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(select, None);
-        assert!(!replay);
 
-        let Decision {
-            verdict,
-            select: _,
-            replay: _,
-        } = barrier.on_key(key(EventKind::Down, 0), None, now);
+        let Decision { verdict, select: _ } = barrier.on_key(key(EventKind::Down, 0), None, now);
         assert_eq!(verdict, Verdict::Pass);
     }
 }

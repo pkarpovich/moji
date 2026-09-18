@@ -16,7 +16,9 @@ The full design, and the reasoning behind every decision, is in
 
 ## Configuration
 
-`$HOME/.config/moji/config.toml`, or wherever `MOJI_CONFIG` points.
+`$HOME/.config/moji/config.toml`, or wherever `MOJI_CONFIG` points. moji ships no default and
+writes none: `run`, `set` and `toggle` exit non-zero while the file is missing, and an installed
+agent without one is restarted by launchd until it exists. `status` and `list` answer without it.
 
 ```toml
 cycle = ["en", "ru"]
@@ -34,12 +36,14 @@ ru = "Russian - Universal"
   reports two different IDs depending on which process asks.
 - `cycle` is the order the switch key and `moji toggle` walk, wrapping at the end. A layout outside
   the cycle, or one no tag names at all, goes to the first entry. The cycle needs at least two
-  entries: selecting the layout that is already selected is confirmed by no notification, so the
-  barrier would wait for the watchdog on every tap.
+  entries, and no tag may stand in it twice: selecting the layout that is already selected is
+  confirmed by no notification, so the barrier would wait for the watchdog on every tap.
 - `[apps]` pins a layout to a bundle id. Every application not listed gets the layout it last used,
   which moji records when the application loses focus and whenever the layout changes. An
   application whose decided layout is already the selected one is left alone, for the same
-  no-notification reason.
+  no-notification reason. A pin fires on the workspace activation notification, so it only reaches
+  applications that become frontmost; `moji status` prints the frontmost bundle id, which is how to
+  find the one to pin.
 - An unknown field, a tag `[layouts]` does not carry, or a name no enabled layout answers to is an
   error that names the file, the field and what was expected. `moji --check-config` parses, resolves
   every tag against the enabled layouts, prints what it made of the file, and exits.
@@ -79,17 +83,27 @@ moji list         print every enabled keyboard layout as name, id and language
 moji install      run this binary as a launchd agent
 moji uninstall    unload the agent and remove what install wrote
 moji --check-config
-moji --version
+                  resolve every configured tag against the enabled layouts, print what moji made
+                  of the file, and exit
+moji --version, -V
+                  print the version
 ```
 
 Everything but `run` is one-shot and talks to Text Input Sources directly: there is no daemon socket,
 and `moji status` answers on a machine where no daemon is running.
+
+`moji install` writes `~/Library/LaunchAgents/dev.pkarpovich.moji.plist` naming the running binary
+with its symlinks resolved, and captures the daemon's output in `~/Library/Logs/moji/moji.log` and
+`moji.err.log` - that is where an installed daemon's log lines go, since launchd gives it no
+terminal. `moji uninstall` unloads the agent and removes the plist; the logs stay.
 
 ## Development
 
 ```
 mise run check    fmt, clippy with -D warnings, and the reproducible tests
 mise run build
-./scripts/bundle.sh target/release/moji target    assemble Moji.app
+./scripts/bundle.sh target/release/moji target [identity]
+                  assemble Moji.app, signed with the hardened runtime when a codesigning
+                  identity is given and unsigned when it is not
 ./scripts/acceptance.sh                           the live suite, needs permissions granted
 ```

@@ -71,6 +71,16 @@ pub enum ConfigError {
         /// How many entries the cycle carries.
         length: usize,
     },
+    /// The same tag stands in the cycle twice.
+    #[error(
+        "{field} repeats the layout tag {tag}, and toggling onto the layout that is already selected is confirmed by no notification"
+    )]
+    RepeatedInCycle {
+        /// Where the repeat was found, as a path into the file.
+        field: String,
+        /// The tag that stands in the cycle more than once.
+        tag: LayoutTag,
+    },
 }
 
 /// Returns the path the configuration is read from.
@@ -99,8 +109,8 @@ pub fn load() -> Result<Config, ConfigError> {
 /// # Errors
 ///
 /// Returns [`ConfigError::Read`] when the file cannot be read, [`ConfigError::Parse`] when it is
-/// not the TOML moji expects, and [`ConfigError::UnknownTag`] or [`ConfigError::ShortCycle`] when
-/// it parses but says something moji cannot act on.
+/// not the TOML moji expects, and [`ConfigError::UnknownTag`], [`ConfigError::ShortCycle`] or
+/// [`ConfigError::RepeatedInCycle`] when it parses but says something moji cannot act on.
 pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -153,6 +163,12 @@ fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
                 field: format!("cycle[{index}]"),
                 tag,
                 known: every_tag(&named),
+            });
+        }
+        if order.contains(&tag) {
+            return Err(ConfigError::RepeatedInCycle {
+                field: format!("cycle[{index}]"),
+                tag,
             });
         }
         order.push(tag);
@@ -216,6 +232,8 @@ struct FileConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::process;
+
     use super::*;
 
     const SAMPLE: &str = r#"
@@ -317,7 +335,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Read { .. }
             | ConfigError::Parse { .. }
-            | ConfigError::ShortCycle { .. } => panic!("the wrong error: {error}"),
+            | ConfigError::ShortCycle { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
         }
 
         let reported = rejected(
@@ -362,7 +381,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Read { .. }
             | ConfigError::Parse { .. }
-            | ConfigError::ShortCycle { .. } => panic!("the wrong error: {error}"),
+            | ConfigError::ShortCycle { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
         }
     }
 
@@ -387,7 +407,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Read { .. }
             | ConfigError::UnknownTag { .. }
-            | ConfigError::ShortCycle { .. } => panic!("the wrong error: {reported}"),
+            | ConfigError::ShortCycle { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {reported}"),
         }
         assert!(reported.contains("hold_ms"), "{reported}");
     }
@@ -409,7 +430,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Read { .. }
             | ConfigError::Parse { .. }
-            | ConfigError::UnknownTag { .. } => panic!("the wrong error: {error}"),
+            | ConfigError::UnknownTag { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
         }
     }
 
@@ -430,7 +452,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Read { .. }
             | ConfigError::Parse { .. }
-            | ConfigError::UnknownTag { .. } => panic!("the wrong error: {error}"),
+            | ConfigError::UnknownTag { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
         }
     }
 
@@ -443,7 +466,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Read { .. }
             | ConfigError::UnknownTag { .. }
-            | ConfigError::ShortCycle { .. } => panic!("the wrong error: {error}"),
+            | ConfigError::ShortCycle { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
         }
     }
 
@@ -482,8 +506,85 @@ ru = "Russian - Universal"
             ConfigError::Read { .. }
             | ConfigError::Parse { .. }
             | ConfigError::UnknownTag { .. }
+            | ConfigError::ShortCycle { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
+        }
+    }
+
+    #[test]
+    fn a_cycle_that_names_the_same_layout_twice_is_rejected() {
+        let error = rejected(
+            r#"
+cycle = ["en", "en"]
+
+[layouts]
+en = "English - Universal"
+ru = "Russian - Universal"
+"#,
+        );
+
+        let reported = error.to_string();
+        match error {
+            ConfigError::RepeatedInCycle { field, tag } => {
+                assert_eq!(field, "cycle[1]");
+                assert_eq!(tag, LayoutTag("en".to_string()));
+            }
+            ConfigError::NoHome
+            | ConfigError::Read { .. }
+            | ConfigError::Parse { .. }
+            | ConfigError::UnknownTag { .. }
+            | ConfigError::ShortCycle { .. } => panic!("the wrong error: {reported}"),
+        }
+        assert!(reported.contains("no notification"), "{reported}");
+    }
+
+    #[test]
+    fn a_longer_cycle_that_repeats_a_layout_is_rejected_too() {
+        let error = rejected(
+            r#"
+cycle = ["en", "ru", "en"]
+
+[layouts]
+en = "English - Universal"
+ru = "Russian - Universal"
+"#,
+        );
+
+        match error {
+            ConfigError::RepeatedInCycle { field, tag } => {
+                assert_eq!(field, "cycle[2]");
+                assert_eq!(tag, LayoutTag("en".to_string()));
+            }
+            ConfigError::NoHome
+            | ConfigError::Read { .. }
+            | ConfigError::Parse { .. }
+            | ConfigError::UnknownTag { .. }
             | ConfigError::ShortCycle { .. } => panic!("the wrong error: {error}"),
         }
+    }
+
+    #[test]
+    fn the_sample_configuration_loads_from_a_file() {
+        let path = std::env::temp_dir().join(format!("moji-config-test-{}.toml", process::id()));
+        fs::write(&path, SAMPLE).expect("write the configuration file");
+
+        let loaded = load_from(&path);
+        let _ = fs::remove_file(&path);
+
+        let Ok(Config {
+            cycle,
+            layouts,
+            apps,
+        }) = loaded
+        else {
+            panic!("the sample configuration does not load from a file");
+        };
+        assert_eq!(cycle, vec![tag("en"), tag("ru")]);
+        assert_eq!(
+            layouts.get(&tag("en")),
+            Some(&"English - Universal".to_string())
+        );
+        assert_eq!(apps.get(&bundle("com.brnbw.Tuna")), Some(&tag("en")));
     }
 
     #[test]
@@ -499,7 +600,8 @@ ru = "Russian - Universal"
             ConfigError::NoHome
             | ConfigError::Parse { .. }
             | ConfigError::UnknownTag { .. }
-            | ConfigError::ShortCycle { .. } => panic!("the wrong error: {error}"),
+            | ConfigError::ShortCycle { .. }
+            | ConfigError::RepeatedInCycle { .. } => panic!("the wrong error: {error}"),
         }
     }
 }

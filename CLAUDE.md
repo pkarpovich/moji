@@ -66,6 +66,10 @@ so a live test cannot be an `#[ignore]`d `#[test]`. Each scenario is a function 
 `cargo test` runs the target with no name, so it prints one line and does nothing: `cargo test` must
 stay reproducible on a machine where nothing in particular is open.
 
+A new scenario is registered twice: in `SCENARIOS` in `tests/live.rs`, and in `LIVE_TESTS` in
+`scripts/acceptance.sh`. Only the second list makes the gate run it, and a scenario missing from it
+leaves the gate green while never executing.
+
 That split is why the crate has both a lib (`src/lib.rs`) and a bin (`src/main.rs`): an integration
 target cannot reach a bin crate, nor a `#[cfg(test)]` item. Anything a live test drives is a plain
 `pub` module of the lib.
@@ -82,6 +86,10 @@ Every new module file is declared the moment it is created - `mod x;` in its par
 No module carries a blanket `#[allow(dead_code)]`: it is what the compiler uses to report a helper
 that was written and never wired up. An item that exists only for tests is `#[cfg(test)]`, and a
 field held for ownership rather than reading carries its own narrow allow.
+
+Every `objc2-*` dependency is `default-features = false` with the features it needs listed by name,
+so reaching for a new Apple type is a new feature in `Cargo.toml` before it is an import: an
+unresolved `objc2_app_kit::…` is almost always a missing feature rather than a missing crate.
 
 ## Per-task gate
 

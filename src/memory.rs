@@ -27,6 +27,15 @@ impl Memory {
         }
     }
 
+    /// Records that `app` is in front already, without deciding anything for it.
+    ///
+    /// The daemon seeds this when it starts: the application that was in front before moji ran
+    /// would otherwise lose focus without its layout being recorded, so its first return finds
+    /// nothing remembered.
+    pub fn seed(&mut self, app: BundleId) {
+        self.frontmost = Some(app);
+    }
+
     /// Records the layout `app` is using now; an unmapped layout records nothing.
     pub fn on_layout_changed(&mut self, app: BundleId, layout: Option<LayoutTag>) {
         let Some(layout) = layout else {
@@ -188,6 +197,35 @@ mod tests {
 
         assert_eq!(
             memory.on_activated(bundle("com.apple.Safari"), Some(tag("ru"))),
+            None
+        );
+    }
+
+    #[test]
+    fn the_app_that_was_in_front_before_moji_started_is_remembered_when_it_loses_focus() {
+        let mut memory = pinned(&[("com.brnbw.Tuna", "en")]);
+        memory.seed(bundle("com.tinyspeck.slackmacgap"));
+
+        assert_eq!(
+            memory.on_activated(bundle("com.brnbw.Tuna"), Some(tag("ru"))),
+            Some(tag("en"))
+        );
+        assert_eq!(
+            memory.on_activated(bundle("com.tinyspeck.slackmacgap"), Some(tag("en"))),
+            Some(tag("ru"))
+        );
+    }
+
+    #[test]
+    fn without_the_seed_the_app_in_front_at_startup_is_not_remembered() {
+        let mut memory = pinned(&[("com.brnbw.Tuna", "en")]);
+
+        assert_eq!(
+            memory.on_activated(bundle("com.brnbw.Tuna"), Some(tag("ru"))),
+            Some(tag("en"))
+        );
+        assert_eq!(
+            memory.on_activated(bundle("com.tinyspeck.slackmacgap"), Some(tag("en"))),
             None
         );
     }

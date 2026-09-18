@@ -362,18 +362,7 @@ fn current_tag(layouts: &BTreeMap<LayoutTag, Layout>) -> Option<LayoutTag> {
         id: _,
         language: _,
     } = tis::current()?;
-
-    for (tag, layout) in layouts {
-        let Layout {
-            name: candidate,
-            id: _,
-            language: _,
-        } = layout;
-        if *candidate == name {
-            return Some(tag.clone());
-        }
-    }
-    None
+    daemon::tag_named(layouts, &name)
 }
 
 fn configured_tag(name: &str) -> Option<LayoutTag> {

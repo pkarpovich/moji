@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::macos::user;
 
+const LAUNCHCTL: &str = "/bin/launchctl";
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const UNLOAD_POLL: Duration = Duration::from_millis(100);
 
@@ -178,7 +179,7 @@ fn wait_unloaded(label: &str) {
     let target = format!("gui/{}/{label}", user::uid());
     let deadline = Instant::now() + UNLOAD_TIMEOUT;
     while Instant::now() < deadline {
-        let printed = Command::new("launchctl")
+        let printed = Command::new(LAUNCHCTL)
             .args(["print", &target])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -245,7 +246,7 @@ fn remove_file(path: &Path) -> Result<(), ServiceError> {
 
 fn unload(label: &str) -> Result<(), ServiceError> {
     let target = format!("gui/{}/{label}", user::uid());
-    let status = Command::new("launchctl")
+    let status = Command::new(LAUNCHCTL)
         .args(["bootout", &target])
         .status()
         .map_err(|source| ServiceError::Launchctl { source })?;
@@ -260,7 +261,7 @@ fn bootstrap(agent: &Path) -> Result<(), ServiceError> {
             path: agent.to_path_buf(),
         });
     };
-    let status = Command::new("launchctl")
+    let status = Command::new(LAUNCHCTL)
         .args(["bootstrap", &target, agent_arg])
         .status()
         .map_err(|source| ServiceError::Launchctl { source })?;
