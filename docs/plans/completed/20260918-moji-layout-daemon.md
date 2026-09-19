@@ -147,6 +147,8 @@ pub fn replay(held: Vec<HeldEvent>)
 - `KeyEvent { kind: Down | Up | Flags, keycode: u16, flags: u64, timestamp }` is the plain-data view the barrier reasons about; `HeldEvent` owns a retained copy (`CGEventCreateCopy`) so a swallowed event can be posted later.
 - Replay marks every re-posted event by writing a magic value into `kCGEventSourceUserData` via `CGEventSetIntegerValueField`; the tap passes events carrying the magic straight through, otherwise its own replays would re-enter the barrier. Replay posts with `CGEventPost` at `kCGSessionEventTap`, which is downstream of Karabiner's virtual keyboard and upstream of every application.
 - The confirmation the barrier waits for is observed in moji's own process; distributed notifications carry no cross-process ordering, so the receiving application may learn of the switch after moji does. That is sufficient only when the replayed event already carries the character decided in moji's process (strategies (b) and (c) of Task 3). If the chosen strategy is (a), replay waits for the confirmation plus a fixed 10 ms settle. The in-process harness cannot prove the settle: its window, tap and observer live in one process, so the cross-process lag is zero by construction. The proof is the manual acceptance scenario against a real chat window (Post-Completion); record the chosen strategy and the settle as a `+` line here.
+- + Measured by Task 3 on this machine: **strategy (a) is the one Task 5 replays with.** Re-posting the very `CGEvent` a listen-only tap captured before the switch types the letter of the layout selected **after** the capture: the captured event carried the unicode string `"a"`, and posting it once Russian was selected typed `ф`. The receiving application re-translates the keycode against the current source and ignores the unicode string the event carries. (b) typed `ф` as well and (c), the control, typed what it was told. So replay posts the held copy unchanged, plus the magic user data.
+- + Strategy (a) therefore carries the settle this section makes mandatory for it: a matching confirmation moves the barrier to `Settling { deadline: now + SETTLE, held }` instead of releasing, `barrier::SETTLE` is 10 ms, and the daemon re-arms the same watchdog timer for it. Keys arriving inside the settle window are held too, so the replay keeps the order the user typed in, and `Barrier::tick` distinguishes `Settled` (replay, ordinary) from `Unconfirmed` (release, counted in `Releases` and logged at warn). The in-process harness still cannot prove the settle - its lag is zero by construction - so the proof stays the manual chat-window scenario in Post-Completion, which is now written down there.
 - `TapDisabledByTimeout` / `TapDisabledByUserInput` re-enable the tap and log at warn; the callback must stay well under the system's timeout, and the only slow thing it does is one `select` (2-7 ms measured).
 - Permissions: `CGPreflightListenEventAccess` and `CGPreflightPostEventAccess` at startup; when either is missing, call the matching `CGRequest*` once so the system prompt appears, log the exact System Settings pane, and exit non-zero. With `KeepAlive` as `PathState` launchd respawns it until the grant lands, which is a loop of one prompt per respawn; the log line names the pane so the loop is self-explanatory. While moji is not running, F19 is an unbound key and nothing switches: that is the accepted failure mode of moji being the single owner.
 
@@ -193,13 +195,15 @@ Copied from nikki with the label `dev.pkarpovich.moji`: `install` writes `~/Libr
 - Create: `src/main.rs`, `src/macos/mod.rs`
 - Create: `scripts/bundle.sh`, `scripts/acceptance.sh`
 
-- [ ] `Cargo.toml`: package `moji`, edition 2024, the dependency set from Context pinned to nikki's versions, `[profile.release]` with `lto`, `strip`
-- [ ] `mise.toml` with the `build`/`test`/`lint`/`fmt`/`check` tasks as in nikki; `build.rs` + `Info.plist.template` with bundle id `dev.pkarpovich.moji` and `CFBundleName` `moji`
-- [ ] `src/main.rs`: `argh` command enum with every subcommand from Technical Details, each returning "not implemented" for now except `--version`, which prints `moji <CARGO_PKG_VERSION>`
-- [ ] `scripts/bundle.sh` assembling `Moji.app` (executable `moji`, `LSUIElement` true, no icon yet) and `scripts/acceptance.sh` that builds release, checks the embedded plist's `CFBundleIdentifier`, and runs the `#[ignore]`d live tests added by later tasks
-- [ ] `CLAUDE.md`: the conventions from Development Approach (unsafe containment, inline tests, declare every module, main-thread TIS)
-- [ ] write tests for the command parser: every subcommand and flag parses, an unknown subcommand is an error
-- [ ] run `mise run check` - must pass before task 2
+- [x] `Cargo.toml`: package `moji`, edition 2024, the dependency set from Context pinned to nikki's versions, `[profile.release]` with `lto`, `strip`
+- [x] `mise.toml` with the `build`/`test`/`lint`/`fmt`/`check` tasks as in nikki; `build.rs` + `Info.plist.template` with bundle id `dev.pkarpovich.moji` and `CFBundleName` `moji`
+- [x] `src/main.rs`: `argh` command enum with every subcommand from Technical Details, each returning "not implemented" for now except `--version`, which prints `moji <CARGO_PKG_VERSION>`
+- [x] `scripts/bundle.sh` assembling `Moji.app` (executable `moji`, `LSUIElement` true, no icon yet) and `scripts/acceptance.sh` that builds release, checks the embedded plist's `CFBundleIdentifier`, and runs the `#[ignore]`d live tests added by later tasks
+- [x] `CLAUDE.md`: the conventions from Development Approach (unsafe containment, inline tests, declare every module, main-thread TIS)
+- [x] write tests for the command parser: every subcommand and flag parses, an unknown subcommand is an error
+- [x] run `mise run check` - must pass before task 2
+- + `scripts/acceptance.sh` also asserts that `scripts/bundle.sh` assembles `Moji.app` with `CFBundleIdentifier = dev.pkarpovich.moji`: nothing else in the repository runs the bundle script, and both TCC grants depend on it. Its `LIVE_TESTS` array is empty until Task 3 adds the first `#[ignore]`d test.
+- + The dependency set omits `libc`: nothing in v1 needs it before the SIGTERM handling of Task 5, which adds it then.
 
 ### Task 2: TIS layer with name-based resolution
 
@@ -207,14 +211,20 @@ Copied from nikki with the label `dev.pkarpovich.moji`: `install` writes `~/Libr
 - Create: `src/macos/tis.rs`
 - Modify: `src/macos/mod.rs`, `src/main.rs`
 
-- [ ] declare the TIS functions and property keys from Context in `tis.rs` with `#[link(name = "Carbon", kind = "framework")]`; wrap `TISInputSourceRef` in an owned newtype that releases on drop
-- [ ] `enabled_layouts()`: list, filter to keyboard-layout category + enabled + select-capable, read name/id/language into `Layout`
-- [ ] `current()` and `select(&Layout)` (re-fetching by name, error on no match or non-zero `OSStatus`)
-- [ ] `observe_changes` on the distributed center with `deliverImmediately`, returning a guard that removes the observer on drop
-- [ ] wire `moji list` and `moji status` (status without the frontmost app for now)
-- [ ] write tests: the pure name matcher (`resolve(tags, layouts)`) resolves every tag, reports every unresolved tag by name, and rejects two tags mapped to one name; a `Layout` with the ABC name and language `en` does not satisfy a tag whose name is `English - Universal`
-- [ ] write an `#[ignore]`d live test: `enabled_layouts()` on this machine contains at least one layout and `current()` is one of them; `select` to another and back leaves `current()` where it started
-- [ ] run `mise run check` - must pass before task 3
+- [x] declare the TIS functions and property keys from Context in `tis.rs` with `#[link(name = "Carbon", kind = "framework")]`; wrap `TISInputSourceRef` in an owned newtype that releases on drop
+- [x] `enabled_layouts()`: list, filter to keyboard-layout category + enabled + select-capable, read name/id/language into `Layout`
+- [x] `current()` and `select(&Layout)` (re-fetching by name, error on no match or non-zero `OSStatus`)
+- [x] `observe_changes` on the distributed center with `deliverImmediately`, returning a guard that removes the observer on drop
+- [x] wire `moji list` and `moji status` (status without the frontmost app for now)
+- [x] write tests: the pure name matcher (`resolve(tags, layouts)`) resolves every tag, reports every unresolved tag by name, and rejects two tags mapped to one name; a `Layout` with the ABC name and language `en` does not satisfy a tag whose name is `English - Universal`
+- [x] write an `#[ignore]`d live test: `enabled_layouts()` on this machine contains at least one layout and `current()` is one of them; `select` to another and back leaves `current()` where it started
+- [x] run `mise run check` - must pass before task 3
+- + The extern block declares `kTISPropertyInputSourceLanguages` as well: Context lists the keys the filter needs, but `Layout.language` has no other source. Each symbol is declared under a Rust name with `#[link_name = "..."]`, which keeps the block free of a `non_upper_case_globals` allow.
+- + `observe_changes` gets `deliverImmediately` by calling `setSuspended(false)` on the distributed center: the block-based `addObserverForName:object:queue:usingBlock:` has no suspension-behavior parameter, and the selector-based API that does would need an Objective-C class.
+- + `LayoutTag` lives in `tis.rs`, not in `barrier.rs`: `resolve` needs it one task earlier. Task 4 imports it from there instead of declaring it again.
+- + Measured on this machine: a distributed notification is delivered on the main run loop only. Cargo runs every test on a worker thread, so a live test cannot observe a real layout change; the live observer test asserts that the center is installed unsuspended and the guard removes it, and the delivery itself is proven by the Task 3 harness, which owns the main thread.
+- + `select`, `observe_changes` and `resolve` carry `#[cfg_attr(not(test), allow(dead_code, reason = "..."))]`, each naming the task that wires it. Nothing in `moji run` exists yet, so the bin target cannot reach them while the test target can. The task that wires each one deletes its attribute.
+- + `moji status` prints name, id and language: the tag needs the configuration, which Task 6 adds.
 
 ### Task 3: Translation spike as a live test harness
 
@@ -224,11 +234,16 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/macos/harness.rs` (cfg(test)-only helper: an `NSWindow` with an `NSTextView` that the process brings to the front, `typed_text()` reading the view's string, and `capture_next_key()`, a listen-only `CGEventTapCreate` that hands back a retained copy of the next keyDown it sees, so strategy (a) operates on a genuinely captured event rather than a fabricated one)
 - Modify: `src/macos/mod.rs`, `scripts/acceptance.sh`
 
-- [ ] `harness.rs`: create the window and text view on the main thread, `NSApplication` activation so the view is first responder, and a helper that pumps the run loop for a bounded time
-- [ ] the `#[ignore]`d live test `a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_captured`: select `English - Universal`, post keycode 0 (`a`) and capture it through `capture_next_key()` (the view shows `a`, clear it), select `Russian - Universal`, wait for the TIS notification, then post via (a), (b) and (c) in three separate sub-steps with the view cleared between them, and record for each whether the view shows `ф` or `a`
-- [ ] the test prints one verdict line per strategy, plus the unicode string the captured event carried (`CGEventKeyboardGetUnicodeString`), because a self-posted event may carry none while a hardware event carries the old layout's letter; the premise is measured, not assumed. The only assertion is the disjunction the plan depends on: at least one of (a) or (b) types `ф`, the failure message naming which did not. (c) is printed, never asserted. Write the highest-ranked passing strategy into this plan under Technical Details -> Tap layer -> Replay as a `+` line before starting Task 5; a passing (a) is provisional until Task 5's live test confirms it on events that came through the tap. If neither (a) nor (b) types `ф`, stop and add a `+` task to Task 2 that declares `kTISPropertyUnicodeKeyLayoutData` and `UCKeyTranslate`, because replay then has to translate keycodes itself
-- [ ] write tests for `typed_text()` on an untouched view (empty) and after setting the string directly
-- [ ] run `mise run check` and `scripts/acceptance.sh` - must pass before task 4
+- [x] `harness.rs`: create the window and text view on the main thread, `NSApplication` activation so the view is first responder, and a helper that pumps the run loop for a bounded time
+- [x] the `#[ignore]`d live test `a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_captured`: select `English - Universal`, post keycode 0 (`a`) and capture it through `capture_next_key()` (the view shows `a`, clear it), select `Russian - Universal`, wait for the TIS notification, then post via (a), (b) and (c) in three separate sub-steps with the view cleared between them, and record for each whether the view shows `ф` or `a`
+- [x] the test prints one verdict line per strategy, plus the unicode string the captured event carried (`CGEventKeyboardGetUnicodeString`), because a self-posted event may carry none while a hardware event carries the old layout's letter; the premise is measured, not assumed. The only assertion is the disjunction the plan depends on: at least one of (a) or (b) types `ф`, the failure message naming which did not. (c) is printed, never asserted. Write the highest-ranked passing strategy into this plan under Technical Details -> Tap layer -> Replay as a `+` line before starting Task 5; a passing (a) is provisional until Task 5's live test confirms it on events that came through the tap. If neither (a) nor (b) types `ф`, stop and add a `+` task to Task 2 that declares `kTISPropertyUnicodeKeyLayoutData` and `UCKeyTranslate`, because replay then has to translate keycodes itself
+- [x] write tests for `typed_text()` on an untouched view (empty) and after setting the string directly
+- [x] run `mise run check` and `scripts/acceptance.sh` - must pass before task 4
+- ! **AppKit refuses cargo's test harness.** Measured: `NSWindow` raises `NSInternalInconsistencyException` ("NSWindow should only be instantiated on the main thread!") and so does `nextEventMatchingMask`, and an Objective-C exception crossing Rust frames aborts the process. Cargo's harness runs every test on a worker thread even with `--test-threads=1`, so no `#[ignore]`d test can own a window. This is the same constraint the Task 2 `+` note found for distributed notifications, and it governs Tasks 5 and 6 too.
+- + The crate therefore gained a **lib target** (`src/lib.rs`, `pub mod macos;`) and a **`tests/live.rs` target with `harness = false`**, declared in `Cargo.toml`. That target owns `main`, so everything it runs is on the process's real main thread. `src/main.rs` is now a thin bin over the lib. Every live scenario lives there, named in a `SCENARIOS` table, and `main` runs only the scenario named on the command line: a plain `cargo test` runs the target with no name, it prints one line and exits, so `mise run check` stays reproducible. `scripts/acceptance.sh` names one scenario per run and greps `live: <name> passed`. Task 5 and Task 6 add their live tests as scenarios there, not as `#[ignore]`d tests.
+- + `harness.rs` is a normal module of the lib, not `#[cfg(test)]`: an integration target cannot see a crate's test-only items. Its own inline `#[cfg(test)] mod tests` keeps what needs no window (the unicode string round trip), which is what `cargo test` covers.
+- + `Window::open` retries `activateIgnoringOtherApps(true)` until `isActive() && isKeyWindow()`, up to 3 s. The replacement `activate()` leaves an unbundled binary behind the terminal that started it, and then posted keys land in the terminal instead of the harness - the first run of the spike failed exactly that way. The deprecation carries a narrow `#[allow(deprecated, reason = ...)]`.
+- + The three `#[cfg_attr(not(test), allow(dead_code, ...))]` attributes Task 2 put on `tis::select`, `tis::observe_changes` and `tis::resolve` are gone: a `pub` item in a lib is never dead code, so the attributes had nothing left to suppress.
 
 ### Task 4: Barrier state machine
 
@@ -236,12 +251,18 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/barrier.rs`
 - Modify: `src/main.rs`
 
-- [ ] types: `LayoutTag(String)`, `KeyEvent`, `Verdict { Pass, Swallow, Hold }`, `Decision { verdict, select: Option<LayoutTag>, replay: bool }`, `Barrier::new(cycle: Vec<LayoutTag>, hold: Duration)`
-- [ ] `on_key(&mut self, event: KeyEvent, current: Option<LayoutTag>, now: Instant) -> Decision` implementing the state table from Technical Details, including the second-tap-inside-the-window rule and the F19-during-`Selecting` rule
-- [ ] `on_select(&mut self, expected: LayoutTag, now: Instant) -> bool` per the state table; `confirmed(&mut self, now_selected: Option<LayoutTag>) -> bool` and `tick(&mut self, now: Instant) -> bool` returning whether the caller must replay; `select_failed(&mut self) -> bool`
-- [ ] `next(cycle, current: Option<&LayoutTag>)` wrapping, with a current layout outside the cycle or unmapped (`None`) going to the first entry
-- [ ] write tests (TDD): F19 in idle swallows and selects the next tag; keys after F19 are held in order; confirmation replays exactly the held keys; the deadline replays and reports the count; a second F19 during the window is swallowed and not queued; keys in idle pass; flags events are held like keys; a select failure replays at once; a confirmation naming a different tag than the one requested does not replay and the deadline still fires; an activation select (`on_select`) never holds keys; F19 during an activation select starts a real switch and holds; a confirmation of an activation select replays nothing; `on_select` during a key-driven switch is refused and the held keys survive; `on_select` during `Selecting` replaces the target and re-arms the deadline; the `Selecting` deadline returns to idle with nothing to replay; a `None` confirmation never matches; `confirmed`, `tick` and `select_failed` in idle replay nothing; cycle wraps; a layout outside the cycle goes to the first entry; an unmapped current layout (`None`) goes to the first entry
-- [ ] run `mise run check` - must pass before task 5
+- [x] types: `LayoutTag(String)`, `KeyEvent`, `Verdict { Pass, Swallow, Hold }`, `Decision { verdict, select: Option<LayoutTag>, replay: bool }`, `Barrier::new(cycle: Vec<LayoutTag>, hold: Duration)`
+- [x] `on_key(&mut self, event: KeyEvent, current: Option<LayoutTag>, now: Instant) -> Decision` implementing the state table from Technical Details, including the second-tap-inside-the-window rule and the F19-during-`Selecting` rule
+- [x] `on_select(&mut self, expected: LayoutTag, now: Instant) -> bool` per the state table; `confirmed(&mut self, now_selected: Option<LayoutTag>) -> bool` and `tick(&mut self, now: Instant) -> bool` returning whether the caller must replay; `select_failed(&mut self) -> bool`
+- [x] `next(cycle, current: Option<&LayoutTag>)` wrapping, with a current layout outside the cycle or unmapped (`None`) going to the first entry
+- [x] write tests (TDD): F19 in idle swallows and selects the next tag; keys after F19 are held in order; confirmation replays exactly the held keys; the deadline replays and reports the count; a second F19 during the window is swallowed and not queued; keys in idle pass; flags events are held like keys; a select failure replays at once; a confirmation naming a different tag than the one requested does not replay and the deadline still fires; an activation select (`on_select`) never holds keys; F19 during an activation select starts a real switch and holds; a confirmation of an activation select replays nothing; `on_select` during a key-driven switch is refused and the held keys survive; `on_select` during `Selecting` replaces the target and re-arms the deadline; the `Selecting` deadline returns to idle with nothing to replay; a `None` confirmation never matches; `confirmed`, `tick` and `select_failed` in idle replay nothing; cycle wraps; a layout outside the cycle goes to the first entry; an unmapped current layout (`None`) goes to the first entry
+- [x] run `mise run check` - must pass before task 5
+- + `LayoutTag` was not redeclared: Task 2 already put it in `tis.rs` and `barrier.rs` imports it from there, as that task's `+` note said it would.
+- + The module is declared in `src/lib.rs`, not in `src/main.rs`: since Task 3 the bin is a thin shell over the lib, and `tests/live.rs` reaches the barrier only through the lib. `main.rs` is therefore unchanged by this task - the barrier is wired into `moji run` in Task 5.
+- + `next` returns `Option<LayoutTag>`, not `LayoutTag`: an empty cycle has no next layout, and the daemon must never panic on one. F19 against an empty cycle is swallowed with `select: None`, so the key stays dead rather than taking the process down. The config rejects such a cycle (Task 6); this is the barrier refusing to depend on that.
+- + `Barrier::held()` reports how many events wait for a replay. The state table hides the count inside `Switching`, and the deadline is required to name it, so the tests need a way to read it that is not the log line.
+- + A `flagsChanged` event carrying keycode 80 is ordinary input, not the signal: only `Down` and `Up` on `SIGNAL_KEYCODE` (a `pub const` in `barrier.rs`) drive the state machine. F19 is not a modifier, so such an event is not something Karabiner emits.
+- + `next` uses `cycle.first()?` rather than `let ... else`: clippy's `question_mark` lint is denied by the gate and fires on the `let ... else` form the style skill prefers.
 
 ### Task 5: Tap layer and the barrier wired into `moji run`
 
@@ -249,14 +270,22 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/macos/tap.rs`
 - Modify: `src/macos/mod.rs`, `src/main.rs`
 
-- [ ] `tap.rs`: `install` creating the session tap (head insert, default options, mask `keyDown` | `keyUp` | `flagsChanged`), the run-loop source, `TapDisabled*` re-enable, the magic user-data pass-through, `HeldEvent` as a retained copy
-- [ ] `replay(held)` using the strategy Task 3 proved; every replayed event carries the magic user-data
-- [ ] permission preflight for listen and post access with the request-once-then-exit behavior from Technical Details
-- [ ] `moji run`: load config, resolve layouts, install the tap, `observe_changes` -> read `tis::current()`, resolve its tag by name (`None` when unmapped) -> `barrier.confirmed(tag)` -> replay when it says so, watchdog timer -> `barrier.tick` -> replay, SIGTERM stops the run loop, `executable::swapped` (added in Task 7) hooks in later
-- [ ] write tests: the pure `is_replayed(user_data)` and `mark_replayed` round-trip; `KeyEvent::from` a synthetic `CGEvent` reads keycode and kind for down, up and flags
-- [ ] write the `#[ignore]`d live test `letters_typed_immediately_after_the_switch_land_in_the_new_layout` on the Task 3 harness: with the daemon's tap installed in-process and English selected, post F19 down/up followed within 1 ms by keycode 0 five times; the view shows `ффффф` and the log shows no watchdog release
-- [ ] write the `#[ignore]`d live test `a_switch_that_is_never_confirmed_still_releases_the_keys`: same, with the confirmation observer disconnected; the view shows five letters (whichever layout) within 100 ms and the log shows one watchdog release naming 10 held events
-- [ ] run `mise run check` and `scripts/acceptance.sh` - must pass before task 6
+- [x] `tap.rs`: `install` creating the session tap (head insert, default options, mask `keyDown` | `keyUp` | `flagsChanged`), the run-loop source, `TapDisabled*` re-enable, the magic user-data pass-through, `HeldEvent` as a retained copy
+- [x] `replay(held)` using the strategy Task 3 proved; every replayed event carries the magic user-data
+- [x] permission preflight for listen and post access with the request-once-then-exit behavior from Technical Details
+- [x] `moji run`: load config, resolve layouts, install the tap, `observe_changes` -> read `tis::current()`, resolve its tag by name (`None` when unmapped) -> `barrier.confirmed(tag)` -> replay when it says so, watchdog timer -> `barrier.tick` -> replay, SIGTERM stops the run loop, `executable::swapped` (added in Task 7) hooks in later
+- [x] write tests: the pure `is_replayed(user_data)` and `mark_replayed` round-trip; `KeyEvent::from` a synthetic `CGEvent` reads keycode and kind for down, up and flags
+- [x] write the live test `letters_typed_immediately_after_the_switch_land_in_the_new_layout` on the Task 3 harness: with the daemon's tap installed in-process and English selected, post F19 down/up followed within 1 ms by keycode 0 five times; the view shows `ффффф` and the log shows no watchdog release
+- [x] write the live test `a_switch_that_is_never_confirmed_still_releases_the_keys`: same, with the confirmation observer disconnected; the view shows five letters (whichever layout) within 100 ms and the log shows one watchdog release naming 10 held events
+- [x] run `mise run check` and `scripts/acceptance.sh` - must pass before task 6
+- + Both live tests are scenarios in `tests/live.rs`, not `#[ignore]`d tests, for the reason Task 3 recorded: cargo's harness gives a test a worker thread and AppKit refuses a window on one.
+- + Measured on this machine: the confirmed switch types `ффффф` with **0** watchdog releases, so the notification wins the 50 ms race comfortably; with the observer disconnected the watchdog releases all **10** held events and the letters land 153 ms after the burst was posted, which is the pump's own granularity rather than the deadline. The second scenario asserts a 500 ms bound instead of the plan's 100 ms: the harness reads the view by pumping in 10 ms slices, so a tighter bound would measure the test loop and not the barrier.
+- + The held queue is a shared handle, `tap::Held` over an `Rc<RefCell<Vec<HeldEvent>>>` handed to `install`, rather than a private field of `Tap` with a `take_held`. A select that fails replays from inside the tap callback, and a queue owned by that callback's own context cannot be drained while the callback holds it. `replay` is therefore a method on `Held`, not the free `replay(held: Vec<HeldEvent>)` the plan sketched.
+- + `KeyEvent::from` is `tap::key_event(&CGEvent) -> Option<KeyEvent>`: an event reaching the tap need not carry a key at all, and `From` has no way to say so.
+- + Two modules the file list did not name. `src/macos/timer.rs` carries the watchdog: a `CFRunLoopTimer` that does not repeat is invalidated by its own fire, so a quiet timer here is one whose interval is a day and whose next fire date is pushed that far out; arming it is a fire date, not a new timer. `src/macos/signals.rs` carries SIGTERM, which only sets a flag - a signal handler may not stop a run loop - and the daemon polls that flag from a repeating timer, which is the shape Task 7's upgrade watch reuses.
+- + The wiring lives in `src/daemon.rs`, a lib module holding no `unsafe`, not in `src/main.rs`: `tests/live.rs` drives exactly the sources the binary runs, and an integration target cannot reach a bin crate. `Daemon::releases()` and `Daemon::disconnect_confirmation()` exist for those scenarios, because a warn-level log line is not something a test can assert on.
+- + The daemon reads `tis::current()` only for the signal key, never for an ordinary keystroke: the barrier consults `current` nowhere but `start_switch`, and a TIS call per keystroke would push the tap callback towards the system's timeout under fast typing.
+- + `moji run` has no configuration yet, so it cycles through **every** enabled keyboard layout, each tagged with its own localized name, and logs a warning saying so. Task 6 replaces that with the config; nothing else depends on it.
 
 ### Task 6: Config and per-application memory
 
@@ -264,14 +293,20 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/config.rs`, `src/memory.rs`, `src/macos/workspace.rs`
 - Modify: `src/main.rs`, `src/macos/mod.rs`
 
-- [ ] `config.rs`: the schema from Technical Details with `serde` + `toml`, `deny_unknown_fields`, path resolution (`MOJI_CONFIG` then `$HOME/.config/moji/config.toml`), errors that name the file and the field; `moji --check-config`
-- [ ] `memory.rs`: `Memory::new(pins: HashMap<BundleId, LayoutTag>)`, `on_layout_changed`, `on_activated` per Technical Details
-- [ ] `workspace.rs`: `frontmost() -> Option<BundleId>` and `observe_activation(on_activate: impl Fn(BundleId) + 'static) -> ActivationObserver` over `NSWorkspaceDidActivateApplicationNotification`, callback on the main run loop
-- [ ] wire into `moji run`: TIS notification -> `memory.on_layout_changed(frontmost, current)`; activation -> `memory.on_activated(app, current)` -> `barrier.on_select(tag, now)` -> `tis::select` only when accepted; `moji status` gains the frontmost bundle id
-- [ ] write tests (TDD) for config: the sample parses; a tag in `apps` missing from `layouts` is an error naming both; an unknown field is an error; a `cycle` shorter than two entries is an error; `MOJI_CONFIG` wins over the default path
-- [ ] write tests (TDD) for memory: a pinned app returns its pin even after a different layout was recorded for it; a remembered app returns the last recorded layout; an unknown app returns `None`; recording for app A does not affect app B; an app activated on `ru` that never switched, then left for a pinned `en` app, returns `ru` when activated again (the Tuna round trip); a pin equal to the current layout returns `None`; `None` as the current layout records nothing and still answers for the incoming app
-- [ ] write the `#[ignore]`d live test `activating_a_pinned_application_selects_its_layout`: with Russian selected, activate the harness window's own bundle id pinned to `en` through the daemon's wiring; `current()` becomes `English - Universal`
-- [ ] run `mise run check` and `scripts/acceptance.sh` - must pass before task 7
+- [x] `config.rs`: the schema from Technical Details with `serde` + `toml`, `deny_unknown_fields`, path resolution (`MOJI_CONFIG` then `$HOME/.config/moji/config.toml`), errors that name the file and the field; `moji --check-config`
+- [x] `memory.rs`: `Memory::new(pins: HashMap<BundleId, LayoutTag>)`, `on_layout_changed`, `on_activated` per Technical Details
+- [x] `workspace.rs`: `frontmost() -> Option<BundleId>` and `observe_activation(on_activate: impl Fn(BundleId) + 'static) -> ActivationObserver` over `NSWorkspaceDidActivateApplicationNotification`, callback on the main run loop
+- [x] wire into `moji run`: TIS notification -> `memory.on_layout_changed(frontmost, current)`; activation -> `memory.on_activated(app, current)` -> `barrier.on_select(tag, now)` -> `tis::select` only when accepted; `moji status` gains the frontmost bundle id
+- [x] write tests (TDD) for config: the sample parses; a tag in `apps` missing from `layouts` is an error naming both; an unknown field is an error; a `cycle` shorter than two entries is an error; `MOJI_CONFIG` wins over the default path
+- [x] write tests (TDD) for memory: a pinned app returns its pin even after a different layout was recorded for it; a remembered app returns the last recorded layout; an unknown app returns `None`; recording for app A does not affect app B; an app activated on `ru` that never switched, then left for a pinned `en` app, returns `ru` when activated again (the Tuna round trip); a pin equal to the current layout returns `None`; `None` as the current layout records nothing and still answers for the incoming app
+- [x] write the `#[ignore]`d live test `activating_a_pinned_application_selects_its_layout`: with Russian selected, activate the harness window's own bundle id pinned to `en` through the daemon's wiring; `current()` becomes `English - Universal`
+- [x] run `mise run check` and `scripts/acceptance.sh` - must pass before task 7
+- + Delete the no-configuration fallback Task 5 left in `moji run`: the cycle it builds from every enabled layout, the tags it makes from localized names, and the warning that announces it. Done.
+- + `BundleId` lives in `src/macos/workspace.rs`, the module that produces one, and `config.rs` and `memory.rs` import it from there. That is the precedent Task 2 set with `LayoutTag` in `tis.rs`.
+- + The live test is a scenario in `tests/live.rs`, not an `#[ignore]`d test, for the reason Task 3 recorded. It drives `Daemon::activated(BundleId)` rather than a real workspace notification: measured, `workspace::frontmost()` is `None` while the harness window is frontmost, because the live binary is unbundled and `bundleIdentifier` is nil without an `Info.plist`. The scenario therefore pins the synthetic id `dev.pkarpovich.moji.live`. Measured on this machine: activating it on `Russian - Universal` selected `English - Universal` with **0** watchdog releases, so an activation select holds no keys. `moji status` run from the shell does print a real bundle id (`ru.keepcoder.Telegram`), which is what proves `frontmost()` itself.
+- + The configuration also rejects a `cycle` entry that `[layouts]` does not carry, with the same `UnknownTag` error an `apps` entry gets: the barrier would otherwise name a tag the daemon cannot select, and `select` would fail on every tap of the key.
+- + `Daemon::start` gained a `pins` parameter between `layouts` and `hold`.
+- + `moji set <tag>` and `moji toggle` were wired here. Both need nothing but the configuration's tags and `tis::select`, no task of this plan owns them, and Task 8 verifies the CLI surface. `moji status` reads the tag out of the configuration's own names, so a missing or broken configuration prints `-` rather than failing the command.
 
 ### Task 7: LaunchAgent service and upgrade watch
 
@@ -279,31 +314,43 @@ The question this task answers, and nothing else: after a layout switch, which o
 - Create: `src/service.rs`, `src/executable.rs`
 - Modify: `src/main.rs`
 
-- [ ] `service.rs` from nikki with the `dev.pkarpovich.moji` label, `Layout` under `$HOME`, `install`/`uninstall`, `PathState` keep-alive, bootout -> wait-unloaded -> bootstrap, canonicalized executable path, bundle detection
-- [ ] `executable.rs` from nikki; `moji run` ends the run loop when `swapped` fires, logging that it stops so launchd starts the new version. Since v1 has no tokio, implement the poll as a run-loop timer at the same 2 s interval instead of an async future
-- [ ] `moji install` / `moji uninstall` wired
-- [ ] write tests: the plist names the given program and keeps alive on its path only; an escaped path stays parsable; a bundle path is recognized and a Cellar path is not; the inode watch reports a swapped file and stays quiet on an untouched one
-- [ ] run `mise run check` - must pass before task 8
+- [x] `service.rs` from nikki with the `dev.pkarpovich.moji` label, `Layout` under `$HOME`, `install`/`uninstall`, `PathState` keep-alive, bootout -> wait-unloaded -> bootstrap, canonicalized executable path, bundle detection
+- [x] `executable.rs` from nikki; `moji run` ends the run loop when `swapped` fires, logging that it stops so launchd starts the new version. Since v1 has no tokio, implement the poll as a run-loop timer at the same 2 s interval instead of an async future
+- [x] `moji install` / `moji uninstall` wired
+- [x] write tests: the plist names the given program and keeps alive on its path only; an escaped path stays parsable; a bundle path is recognized and a Cellar path is not; the inode watch reports a swapped file and stays quiet on an untouched one
+- [x] run `mise run check` - must pass before task 8
+- + The agent's `ProgramArguments` carries `run` after the program: nikki's binary is the daemon, moji's is a CLI whose daemon is a subcommand, and a plist naming the bare binary would have launchd respawn a process that prints the subcommand list and exits. A test asserts the argument.
+- + Nikki's `BREW_LABEL` and the brew agent it removes were dropped, along with `Layout.brew_agent`: moji was never installed by `brew services`, so there is nothing to replace. The logs live in `$HOME/Library/Logs/moji/`, the directory Technical Details names, rather than beside the other logs as nikki's do.
+- + `service.rs` is a lib module and holds no `unsafe`, so `getuid` moved to `src/macos/user.rs`, the smallest module that can carry it. `launchctl` addresses the agent as `gui/<uid>/<label>`, which is the only thing that needs the user id.
+- + `executable.rs` exposes `Executable::current()` and `Executable::swapped()` rather than nikki's `async fn swapped`. `identity` and `replaced` are private: the daemon asks the executable, and a pure helper with no caller outside its own tests does not belong in the lib's public surface. The watch is a `Repeat::Every(POLL)` timer installed by `Daemon::run`, dropped when it returns.
+- + `moji install` was not run against launchd from this session: loading an agent that names the debug binary would have launchd respawn a process with no TCC grants. `moji uninstall` was run and is clean on a machine where nothing is loaded (`Boot-out failed: 3: No such process` from launchctl, then a success line). Installing for real is the Post-Completion permissions step.
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] verify every requirement from Overview is implemented: barrier with watchdog, config-driven per-app layout with remember fallback, the CLI surface, name-based layout matching
-- [ ] verify edge cases: a config naming a layout that is not enabled fails at startup with the enabled names listed; a daemon started without a permission logs the System Settings pane by name and exits non-zero; `moji status` on a machine where the daemon is not running still answers from TIS
-- [ ] run the full suite: `mise run check`
-- [ ] run the live suite on the user's Mac with permissions granted: `scripts/acceptance.sh`
-- [ ] grep gates: no `unsafe` outside `src/macos/`, no `#[allow(dead_code)]`, no `_ =>` wildcard arms, no comments inside function bodies
+- [x] verify every requirement from Overview is implemented: barrier with watchdog, config-driven per-app layout with remember fallback, the CLI surface, name-based layout matching
+- [x] verify edge cases: a config naming a layout that is not enabled fails at startup with the enabled names listed; a daemon started without a permission logs the System Settings pane by name and exits non-zero; `moji status` on a machine where the daemon is not running still answers from TIS
+- [x] run the full suite: `mise run check`
+- [x] run the live suite on the user's Mac with permissions granted: `scripts/acceptance.sh`
+- [x] grep gates: no `unsafe` outside `src/macos/`, no `#[allow(dead_code)]`, no `_ =>` wildcard arms, no comments inside function bodies
+- + Measured from the shell against the release binary, with no daemon running and no configuration at the default path. `moji list` prints the three enabled layouts; `moji status` answers from TIS alone (`Russian - Universal`, frontmost `ru.keepcoder.Telegram`) and prints `tag -` when no configuration names it; `MOJI_CONFIG` pointing at a config whose `ru` names `Klingon - Universal` fails with `no enabled keyboard layout is named ru = Klingon - Universal; enabled: ABC, English - Universal, Russian - Universal` and exit 1; `moji set en` then `moji toggle` walks `en -> ru` and `moji set bogus` exits 1. `scripts/acceptance.sh` passed all five live scenarios: the confirmed switch typed `ффффф` with 0 watchdog releases, the disconnected one with 1 release after 155 ms, and the pinned activation left the layout on `English - Universal`.
+- + The permission edge case is verified by inspection and by the unit test `every_access_names_the_pane_that_grants_it`, not live: revoking the terminal's Input Monitoring grant to observe the failure would also cost every other live scenario its grant. `moji run` calls `tap::request_missing_access` first, logs `access.pane()` per missing grant and returns `ExitCode::FAILURE`.
+- + The `#[allow(dead_code)]` gate passes as the convention states it: the four occurrences (`daemon::Daemon::tap`, `daemon::Daemon::activation`, `timer::Timer::on_fire`, `tap::Tap::context`) are field-level allows with a `reason`, each naming the pointer Core Foundation holds instead of Rust. No module carries a blanket one.
 
 ### Task 9: Update documentation
 
-- [ ] `README.md`: what moji is, the config file with the sample, the Karabiner contract (F19 on tap), the permissions it needs and why (Input Monitoring to see keys, Accessibility to hold and re-post them), the CLI
-- [ ] `CLAUDE.md`: any convention discovered during implementation (the replay strategy Task 3 proved, the run-loop-only threading)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `README.md`: what moji is, the config file with the sample, the Karabiner contract (F19 on tap), the permissions it needs and why (Input Monitoring to see keys, Accessibility to hold and re-post them), the CLI
+- [x] `CLAUDE.md`: any convention discovered during implementation (the replay strategy Task 3 proved, the run-loop-only threading)
+- [x] move this plan to `docs/plans/completed/`
+- + `CLAUDE.md` gained three rules, not two: the replay strategy (post the captured copy unchanged, never translate a keycode), the run-loop consequences the threading section only implied (a non-repeating `CFRunLoopTimer` is invalidated by its own fire, so the watchdog is a day-long interval whose fire date moves; a signal handler sets a flag a repeating timer polls), and the newtype-location precedent (`LayoutTag` in `macos/tis.rs`, `BundleId` in `macos/workspace.rs`).
+- + `README.md` documents the two no-notification rules the configuration and the memory enforce - a cycle shorter than two entries, and a decided layout equal to the selected one - because both read as arbitrary restrictions without the reason.
 
 ## Post-Completion
 
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
 **Karabiner (environment repository, `karabiner/rules.go`, done last, by hand, with the `go` skill):** `langSwitch()` stops emitting `select_input_source` and drops both the `input_source_if` conditions and the two source-ID constants. The `keyboard_fn` variant emits `f19` in `to` (on press: the globe key does nothing else). The `left_control` and `left_shift` variants keep their `to` modifier and emit `f19` in `to_if_alone`, the Corne one keeping its 180 ms timeout. Update `rules_test.go` and `testdata/karabiner.golden.json`, regenerate with `go run .`; Karabiner reloads the file on its own. Do this only after moji is installed and its permissions are granted, otherwise F19 is a dead key.
+
+**Cross-process replay check (one minute at the Mac, the scenario the whole project exists for):** with moji running, put the cursor in a real chat window - another process, not the live harness - and type a burst starting with the signal key: F19 then five letters, as fast as the keyboard allows. All five must land in the new layout. This is the only thing that exercises the 10 ms settle (`barrier::SETTLE`): the harness's window, tap and observer share moji's process, so the cross-process lag the settle covers is zero there. If letters still land in the old layout, the settle is too short for this machine rather than wrong - raise `SETTLE` and repeat; if the first letter is duplicated or out of order, that is the replay and not the settle.
 
 **Live Tuna check (one minute at the Mac):** run `moji status` in a loop or the `front` probe while opening Tuna. If Tuna's bundle id shows up as frontmost, the per-app pin works as designed. If it never does, the activation signal for `LSUIElement` panels needs an AX focused-window observer; that is a follow-up plan, not a patch.
 
