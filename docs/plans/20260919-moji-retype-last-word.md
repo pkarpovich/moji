@@ -200,10 +200,14 @@ impl<T> History<T> {
 **Files:**
 - Modify: `src/macos/tap.rs`
 
-- [ ] extend `KEYBOARD_MASK` and `kind_of` with the three mouse-down types reporting `EventKind::MouseDown`
-- [ ] add `HeldEvent::capture`, `HeldEvent::duplicate`, `Held::push_stroke` and `post_backspaces` per Technical Details
-- [ ] write tests: a left, right and other mouse-down event reads as `EventKind::MouseDown`; `push_stroke` leaves a keyDown then a keyUp with the same keycode in the queue; a captured then duplicated event is a distinct copy carrying the same keycode and flags; the backspace event builder yields keycode 51 marked with the replay magic (factor the builder so the test does not post)
-- [ ] run `mise run check` and `./scripts/acceptance.sh` - must pass before task 5
+- [x] extend `KEYBOARD_MASK` and `kind_of` with the three mouse-down types reporting `EventKind::MouseDown`
+- [x] add `HeldEvent::capture`, `HeldEvent::duplicate`, `Held::push_stroke` and `post_backspaces` per Technical Details
+- [x] write tests: a left, right and other mouse-down event reads as `EventKind::MouseDown`; `push_stroke` leaves a keyDown then a keyUp with the same keycode in the queue; a captured then duplicated event is a distinct copy carrying the same keycode and flags; the backspace event builder yields keycode 51 marked with the replay magic (factor the builder so the test does not post)
+- [x] run `mise run check` (green) and `./scripts/acceptance.sh` (skipped - not automatable in this session, see ⚠️ below)
+
+⚠️ `./scripts/acceptance.sh` cannot run in the non-interactive session this task was implemented in: the very first live scenario panics in `src/macos/harness.rs` with "the harness window never became frontmost", before any tap code is reached. Verified pre-existing by stashing the change and running the same scenario on `13efd0a`, which fails identically, so this is the session having no interactive GUI focus and no Input Monitoring grant, not a regression. The script has to be run from an interactive terminal that holds both grants; Task 6 needs it too.
+➕ `Kept` became public, because the pinned `Held::push_stroke` returns it.
+➕ `post_backspaces` is built on a private `backspace_pair()` so the test can assert keycode 51 and the replay magic without posting to the session tap.
 
 ### Task 5: Wire the history and the flip into the daemon
 
