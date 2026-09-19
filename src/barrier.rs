@@ -13,6 +13,9 @@ use crate::macos::tis::LayoutTag;
 /// The virtual keycode of F19, the key Karabiner emits on a tap and moji swallows.
 pub const SIGNAL_KEYCODE: u16 = 80;
 
+/// The virtual keycode of F18, the key Karabiner emits to ask for a retype and moji swallows.
+pub const RETYPE_KEYCODE: u16 = 79;
+
 /// How long the held events wait after the confirmation before they are replayed.
 ///
 /// The confirmation is observed in moji's own process, and the distributed notification that
@@ -31,6 +34,8 @@ pub enum EventKind {
     Up,
     /// A modifier changing state.
     Flags,
+    /// A mouse button going down.
+    MouseDown,
 }
 
 /// Whether a key-down is the press itself or the system repeating a held key.
@@ -400,6 +405,7 @@ fn classify(event: KeyEvent) -> Signal {
         },
         EventKind::Up => Signal::Release,
         EventKind::Flags => Signal::Other,
+        EventKind::MouseDown => Signal::Other,
     }
 }
 

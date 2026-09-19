@@ -114,7 +114,9 @@ impl<T> History<T> {
 
 `record` with `tag: None` (the selected layout is not in the configuration) clears instead of recording: an entry without a tag could never be flipped. Recording past `CAP` drops the oldest entry. Any `record` resets the flip marker; `erase` on an empty history is a no-op and does not touch the marker; `clear` resets both.
 
-`flip`: the tail is the maximal trailing run of entries sharing the last entry's tag; empty history is `None`. The word is the trailing `Space` entries plus the `Letter` entries before them up to the previous `Space`, all within the tail. Marker `Typed` selects the word; marker `Flipped` selects the tail. `target` is `cycle::next(cycle, Some(&tag))`; a tag outside the cycle goes to the cycle's first entry like everywhere else, and an empty cycle is `None`. On success the flipped entries get `target` as their tag and the marker becomes `Flipped`. `last(count)` returns the payloads of the last `count` entries in typing order, for the daemon to duplicate into the queue.
+`flip`: the tail is the run of entries typed since the layout last changed under the fingers; empty history is `None`. The word is the trailing `Space` entries plus the `Letter` entries before them up to the previous `Space`, all within the tail. Marker `Typed` selects the word; marker `Flipped` selects the tail. `target` is `cycle::next` of the tag of the **first covered entry**; a tag outside the cycle goes to the cycle's first entry like everywhere else, and an empty cycle is `None`. On success the covered entries get `target` as their tag and the marker becomes `Flipped`. `last(count)` returns the payloads of the last `count` entries in typing order, for the daemon to duplicate into the queue.
+
+⚠️ Deviation found in Task 2: an entry's tag is the layout it currently *shows* in, so a flip rewrites it, and the run boundary cannot be read back off the tags. Each entry therefore carries a `Run { Start, Same }` set at `record` time - `Start` when the tag differs from the entry before it - and the tail is the stretch back to the last `Start`. Deriving the tail from the tags instead, as this section first said, breaks the acceptance scenario: the word flip retags its 7 entries, the second press would read a 7-entry tail of the new tag and flip it straight back instead of covering all 11. Taking `target` from the first covered entry rather than the last is the other half of that fix: after a word flip the covered range is mixed, and only its first entry still names the layout the run was typed in. The run boundary also survives every flip, which is what keeps a second press off text that was typed correctly before a manual switch.
 
 ### Cycle (`src/cycle.rs`)
 
@@ -173,11 +175,14 @@ impl<T> History<T> {
 - Create: `src/history.rs`
 - Modify: `src/lib.rs`
 
-- [ ] write failing tests on `History<()>`: recording letters and spaces under a tag, `erase` popping one entry and being a no-op when empty, `clear` emptying, `record` with `tag: None` clearing, `CAP` dropping the oldest entry
-- [ ] write failing tests for `action`: every keycode in the `Clear` table, Delete as `Erase`, Space as `Record(Space)`, a letter and its repeat as `Record(Letter)`, Command and Control flagged downs as `Clear`, `Up`, `Flags`, `SWITCH_KEYCODE` and `RETYPE_KEYCODE` as `Ignore`, `MouseDown` as `Clear`
-- [ ] write failing tests for `flip`: empty history is `None`; a single word flips its letters and trailing spaces; a second `flip` without a recording covers the whole tail; a recording between two flips makes the second one a word again; a tail of mixed tags stops at the tag change and targets the next layout after the last entry's tag; a flipped word carries the target tag afterwards so a third flip goes back; a tag outside the cycle targets the first entry; an empty cycle is `None`; `last(count)` returns payloads in typing order
-- [ ] implement `src/history.rs` to the pinned surface, declared in `src/lib.rs`
-- [ ] run `mise run check` - must pass before task 3
+- [x] write failing tests on `History<()>`: recording letters and spaces under a tag, `erase` popping one entry and being a no-op when empty, `clear` emptying, `record` with `tag: None` clearing, `CAP` dropping the oldest entry
+- [x] write failing tests for `action`: every keycode in the `Clear` table, Delete as `Erase`, Space as `Record(Space)`, a letter and its repeat as `Record(Letter)`, Command and Control flagged downs as `Clear`, `Up`, `Flags`, `SWITCH_KEYCODE` and `RETYPE_KEYCODE` as `Ignore`, `MouseDown` as `Clear` (written against `SIGNAL_KEYCODE`, which Task 3 renames)
+- [x] write failing tests for `flip`: empty history is `None`; a single word flips its letters and trailing spaces; a second `flip` without a recording covers the whole tail; a recording between two flips makes the second one a word again; a tail of mixed tags stops at the tag change and targets the next layout after the last entry's tag; a flipped tail carries the target tag afterwards so the flip after it goes back; a tag outside the cycle targets the first entry; an empty cycle is `None`; `last(count)` returns payloads in typing order - plus the acceptance sentence itself, 7 then 11 then 11 back
+- [x] implement `src/history.rs` to the pinned surface, declared in `src/lib.rs`
+- [x] run `mise run check` - must pass before task 3
+
+⚠️ `pub const RETYPE_KEYCODE: u16 = 79` and `EventKind::MouseDown` landed in `src/barrier.rs` here, because `action` cannot be written or tested without them; `classify` maps `MouseDown` to `Signal::Other` until Task 3 gives it `Signal::Mouse`. The tap does not report mouse events until Task 4, so nothing observable changed.
+➕ `History::is_empty` sits next to `len`, which clippy requires of a public `len`.
 
 ### Task 3: Second signal key in the barrier
 
