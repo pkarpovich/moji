@@ -46,7 +46,9 @@ The second signal key, **F18**, retypes what was just typed in the other layout.
 
 What moji did not see, it cannot flip. The history holds only keystrokes that passed the tap since it started, so text typed before moji ran, pasted text, and text selected with the mouse are out of reach. These forget the history outright: a click, Return, Tab, Escape, an arrow or any other caret key, a key that types no letter at all such as a function key, a chord carrying Command, Control or Option, the keyboard moving to another application, and a keystroke typed in a layout no tag in the configuration names. Delete drops the last keystroke, as it did downstream.
 
-A press with nothing in reach does nothing, and so does one while a switch is still running or one carrying a modifier. When the layout cannot be selected, nothing is deleted and nothing is replayed: the text stays as it was typed.
+One more thing is out of reach by construction: a source that does not type one character per keystroke. moji counts keystrokes, never characters, so a layout with dead keys or an input method that composes a character out of several keystrokes does not belong in `[layouts]` - a press would delete one character too many. A source no tag names clears the history instead of recording, which is what keeps such input out of the way.
+
+A press with nothing in reach does nothing, and so does one while a switch is still running or one carrying Command, Control or Option. Shift is not one of them: it is part of typing, the history records the keystrokes it shifts, and the retype key emitted from a shifted key still retypes. When the layout cannot be selected, nothing is deleted and nothing is replayed: the text stays as it was typed.
 
 ## The contract with Karabiner
 

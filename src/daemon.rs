@@ -21,7 +21,7 @@ use crate::executable::{self, Executable};
 use crate::history::{self, Action, Flip, History};
 use crate::macos::focus;
 use crate::macos::signals;
-use crate::macos::tap::{self, Held, HeldEvent, Kept, Placement, Tap, TapError};
+use crate::macos::tap::{self, Deletions, Held, HeldEvent, Kept, Placement, Tap, TapError};
 use crate::macos::timer::{Repeat, Timer, TimerError};
 use crate::macos::tis::{self, ChangeObserver, Layout, LayoutTag};
 use crate::macos::workspace::BundleId;
@@ -322,7 +322,7 @@ impl State {
             };
             history.planned(&self.cycle)
         };
-        let Some(Flip { count: _, target }) = planned else {
+        let Some(Flip { count, target }) = planned else {
             tracing::debug!(
                 "nothing moji saw typed is within reach, so the retype key does nothing"
             );
@@ -346,6 +346,14 @@ impl State {
             }
         }
 
+        let Some(deletions) = Deletions::built(count) else {
+            tracing::warn!(
+                count,
+                "a deletion could not be built, so nothing is retyped"
+            );
+            return;
+        };
+
         let flipped = {
             let Ok(mut history) = self.history.try_borrow_mut() else {
                 return;
@@ -356,7 +364,6 @@ impl State {
             return;
         };
 
-        tap::post_backspaces(count);
         match self.push_strokes(count) {
             Kept::Yes => {}
             Kept::No => {
@@ -364,10 +371,11 @@ impl State {
                     "a keystroke could not be copied for the retype, so the history is dropped"
                 );
                 self.forget_history();
-                self.release();
+                self.held.replay();
                 return;
             }
         }
+        deletions.post();
 
         match switch {
             Switch::Unnecessary => {
@@ -411,13 +419,7 @@ impl State {
         let Ok(history) = self.history.try_borrow() else {
             return Kept::No;
         };
-        for event in history.last(count) {
-            match self.held.push_stroke(event) {
-                Kept::Yes => {}
-                Kept::No => return Kept::No,
-            }
-        }
-        Kept::Yes
+        self.held.push_strokes(&history.last(count))
     }
 
     fn forget_history(&self) {

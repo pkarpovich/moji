@@ -151,23 +151,32 @@ impl Held {
         self.len() == 0
     }
 
-    /// Pushes the keyDown of a captured stroke and the matching keyUp, in that order.
-    pub fn push_stroke(&self, event: &HeldEvent) -> Kept {
-        let Some(down) = event.duplicate() else {
-            return Kept::No;
-        };
-        let Some(up) = event.duplicate() else {
-            return Kept::No;
-        };
-        let HeldEvent(raised) = &up;
-        CGEvent::set_type(Some(raised), CGEventType::KeyUp);
+    /// Pushes the keyDown of every captured stroke and its matching keyUp, in that order.
+    ///
+    /// Every copy is made before the queue is touched, so a copy that fails leaves the queue
+    /// exactly as it was rather than holding half of what was asked for.
+    pub fn push_strokes(&self, events: &[&HeldEvent]) -> Kept {
+        let mut strokes = Vec::new();
+        for event in events {
+            let Some(down) = event.duplicate() else {
+                return Kept::No;
+            };
+            let Some(up) = event.duplicate() else {
+                return Kept::No;
+            };
+            let HeldEvent(raised) = &up;
+            CGEvent::set_type(Some(raised), CGEventType::KeyUp);
+            strokes.push(down);
+            strokes.push(up);
+        }
 
         let Held(queue) = self;
         let Ok(mut queue) = queue.try_borrow_mut() else {
             return Kept::No;
         };
-        queue.push(down);
-        queue.push(up);
+        for stroke in strokes {
+            queue.push(stroke);
+        }
         Kept::Yes
     }
 
@@ -342,15 +351,30 @@ fn backspace_pair() -> Option<(CFRetained<CGEvent>, CFRetained<CGEvent>)> {
     Some((down, up))
 }
 
-/// Posts `count` backspace strokes to the session tap, marked so moji's own tap passes them on.
-pub fn post_backspaces(count: usize) {
-    for _ in 0..count {
-        let Some((down, up)) = backspace_pair() else {
-            tracing::warn!("creating a backspace event failed, {count} backspaces were wanted");
-            return;
-        };
-        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&down));
-        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&up));
+/// The backspace strokes a retype deletes with, all built before any of them goes out.
+pub struct Deletions(Vec<HeldEvent>);
+
+impl Deletions {
+    /// Returns the strokes that delete `count` characters, or nothing when building one fails.
+    ///
+    /// Every stroke is built up front, so a failure posts nothing at all instead of leaving the
+    /// text with some of the characters deleted and no replacement coming.
+    pub fn built(count: usize) -> Option<Deletions> {
+        let mut strokes = Vec::new();
+        for _ in 0..count {
+            let (down, up) = backspace_pair()?;
+            strokes.push(HeldEvent(down));
+            strokes.push(HeldEvent(up));
+        }
+        Some(Deletions(strokes))
+    }
+
+    /// Posts every stroke to the session tap, marked so moji's own tap passes it on.
+    pub fn post(self) {
+        let Deletions(strokes) = self;
+        for HeldEvent(event) in &strokes {
+            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+        }
     }
 }
 
@@ -674,7 +698,7 @@ mod tests {
             panic!("capturing a keyboard event failed");
         };
 
-        let Kept::Yes = held.push_stroke(&captured) else {
+        let Kept::Yes = held.push_strokes(&[&captured]) else {
             panic!("pushing a captured stroke into the queue failed");
         };
 
@@ -697,16 +721,48 @@ mod tests {
             panic!("capturing a keyboard event failed");
         };
 
-        let Kept::Yes = held.push_stroke(&captured) else {
-            panic!("pushing a captured stroke into the queue failed");
-        };
-        let Kept::Yes = held.push_stroke(&captured) else {
+        let Kept::Yes = held.push_strokes(&[&captured, &captured]) else {
             panic!("pushing a captured stroke into the queue failed");
         };
 
         let HeldEvent(event) = &captured;
         assert_eq!(CGEvent::r#type(Some(event)), CGEventType::KeyDown);
         assert_eq!(held.len(), 4);
+    }
+
+    #[test]
+    fn every_deletion_is_built_before_any_of_them_is_posted() {
+        let Some(Deletions(strokes)) = Deletions::built(3) else {
+            panic!("building the deletions failed");
+        };
+
+        let mut built = Vec::new();
+        for HeldEvent(event) in &strokes {
+            built.push((CGEvent::r#type(Some(event)), keycode_of(event)));
+            assert!(is_replayed(user_data(event)));
+        }
+
+        let keycode = i64::from(BACKSPACE_KEYCODE);
+        assert_eq!(
+            built,
+            vec![
+                (CGEventType::KeyDown, keycode),
+                (CGEventType::KeyUp, keycode),
+                (CGEventType::KeyDown, keycode),
+                (CGEventType::KeyUp, keycode),
+                (CGEventType::KeyDown, keycode),
+                (CGEventType::KeyUp, keycode),
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_to_delete_builds_no_stroke_at_all() {
+        let Some(Deletions(strokes)) = Deletions::built(0) else {
+            panic!("building no deletion at all failed");
+        };
+
+        assert!(strokes.is_empty());
     }
 
     #[test]

@@ -13,9 +13,9 @@ pub const CAP: usize = 512;
 
 const DELETE: u16 = 51;
 const SPACE: u16 = 49;
-const CLEARING: [u16; 33] = [
+const CLEARING: [u16; 36] = [
     36, 76, 48, 53, 115, 116, 119, 121, 117, 123, 124, 125, 126, 122, 120, 99, 118, 96, 97, 98,
-    100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 90, 114, 71,
+    100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 90, 114, 71, 110, 102, 104,
 ];
 
 /// What a recorded keystroke contributes to a word.
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn keys_that_type_no_letter_clear_the_history_rather_than_counting_as_one() {
-        let named: [(u16, &str); 20] = [
+        let named: [(u16, &str); 23] = [
             (122, "F1"),
             (120, "F2"),
             (99, "F3"),
@@ -455,6 +455,9 @@ mod tests {
             (90, "F20"),
             (114, "Help"),
             (71, "keypad Clear"),
+            (110, "Application"),
+            (102, "JIS Eisu"),
+            (104, "JIS Kana"),
         ];
 
         for (keycode, name) in named {
