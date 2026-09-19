@@ -357,7 +357,17 @@ impl State {
         };
 
         tap::post_backspaces(count);
-        self.push_strokes(count);
+        match self.push_strokes(count) {
+            Kept::Yes => {}
+            Kept::No => {
+                tracing::warn!(
+                    "a keystroke could not be copied for the retype, so the history is dropped"
+                );
+                self.forget_history();
+                self.release();
+                return;
+            }
+        }
 
         match switch {
             Switch::Unnecessary => {
@@ -397,18 +407,24 @@ impl State {
         }
     }
 
-    fn push_strokes(&self, count: usize) {
+    fn push_strokes(&self, count: usize) -> Kept {
         let Ok(history) = self.history.try_borrow() else {
-            return;
+            return Kept::No;
         };
         for event in history.last(count) {
             match self.held.push_stroke(event) {
                 Kept::Yes => {}
-                Kept::No => {
-                    tracing::warn!("a keystroke could not be copied for the retype, so it is lost");
-                }
+                Kept::No => return Kept::No,
             }
         }
+        Kept::Yes
+    }
+
+    fn forget_history(&self) {
+        let Ok(mut history) = self.history.try_borrow_mut() else {
+            return;
+        };
+        history.clear();
     }
 
     fn on_confirmation(&self) {
