@@ -1,20 +1,11 @@
-//! NSWorkspace, the only door moji has to which application the user is typing into.
+//! NSWorkspace: the frontmost application, and the bundle id an application is known by.
 //!
-//! The activation notification is posted on the main thread, and the block is registered with no
-//! operation queue, so it runs there too: the same run loop every other source of the daemon lives
-//! on, which is what lets the memory policy and the barrier stay free of locks.
+//! The frontmost application is only the fallback for [`super::focus`], which follows the keyboard
+//! rather than the activation: a launcher panel takes the keyboard without ever becoming frontmost.
 
 use std::fmt;
-use std::ptr::NonNull;
 
-use block2::RcBlock;
-use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2_app_kit::{
-    NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
-    NSWorkspaceDidActivateApplicationNotification,
-};
-use objc2_foundation::NSNotification;
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 
 /// The bundle identifier of an application, which is what the configuration pins a layout to.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -27,18 +18,6 @@ impl fmt::Display for BundleId {
     }
 }
 
-/// Removes the activation observer from the workspace notification center when dropped.
-pub struct ActivationObserver {
-    token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
-}
-
-impl Drop for ActivationObserver {
-    fn drop(&mut self) {
-        let center = NSWorkspace::sharedWorkspace().notificationCenter();
-        unsafe { center.removeObserver(self.token.as_ref()) };
-    }
-}
-
 /// Returns the bundle id of the application that is frontmost right now.
 ///
 /// An application without an `Info.plist`, which is what an unbundled binary is, carries no bundle
@@ -48,36 +27,7 @@ pub fn frontmost() -> Option<BundleId> {
     bundle_id(&application)
 }
 
-/// Calls `on_activate` on the main run loop whenever another application comes to the front.
-pub fn observe_activation(on_activate: impl Fn(BundleId) + 'static) -> ActivationObserver {
-    let center = NSWorkspace::sharedWorkspace().notificationCenter();
-    let block = RcBlock::new(move |notification: NonNull<NSNotification>| {
-        let notification = unsafe { notification.as_ref() };
-        let Some(activated) = activated_application(notification) else {
-            return;
-        };
-        on_activate(activated);
-    });
-    let token = unsafe {
-        center.addObserverForName_object_queue_usingBlock(
-            Some(NSWorkspaceDidActivateApplicationNotification),
-            None,
-            None,
-            &block,
-        )
-    };
-    ActivationObserver { token }
-}
-
-fn activated_application(notification: &NSNotification) -> Option<BundleId> {
-    let user_info = notification.userInfo()?;
-    let key: &AnyObject = unsafe { NSWorkspaceApplicationKey }.as_ref();
-    let application = user_info.objectForKey(key)?;
-    let application = application.downcast_ref::<NSRunningApplication>()?;
-    bundle_id(application)
-}
-
-fn bundle_id(application: &NSRunningApplication) -> Option<BundleId> {
+pub(super) fn bundle_id(application: &NSRunningApplication) -> Option<BundleId> {
     let bundle = application.bundleIdentifier()?;
     Some(BundleId(bundle.to_string()))
 }

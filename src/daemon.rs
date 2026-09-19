@@ -1,9 +1,10 @@
 //! The daemon: the run loop sources, the barrier they feed, and nothing else.
 //!
 //! Everything here is safe code over the `macos` layer. The tap hands keyboard events to the
-//! barrier and executes its verdict, the input source observer confirms the switch, and the
-//! watchdog releases the held keys when no confirmation arrives in time. All three are sources on
-//! the main thread's run loop, which is also the only thread Text Input Sources may be called from.
+//! barrier and executes its verdict, the input source observer confirms the switch, the focus
+//! poll notices the keyboard moving to another application, and the watchdog releases the held
+//! keys when no confirmation arrives in time. All of them are sources on the main thread's run
+//! loop, which is also the only thread Text Input Sources may be called from.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeMap;
@@ -16,11 +17,12 @@ use crate::barrier::{
     Barrier, Confirmed, Decision, Elapsed, KeyEvent, SETTLE, SIGNAL_KEYCODE, Verdict,
 };
 use crate::executable::{self, Executable};
+use crate::macos::focus;
 use crate::macos::signals;
 use crate::macos::tap::{self, Held, Placement, Tap, TapError};
 use crate::macos::timer::{Repeat, Timer, TimerError};
 use crate::macos::tis::{self, ChangeObserver, Layout, LayoutTag};
-use crate::macos::workspace::{self, ActivationObserver, BundleId};
+use crate::macos::workspace::BundleId;
 use crate::memory::Memory;
 
 /// How long a switch may wait for its confirmation before the held keys go through anyway.
@@ -55,9 +57,9 @@ pub struct Daemon {
     observer: Option<ChangeObserver>,
     #[allow(
         dead_code,
-        reason = "the activation observer is held so that dropping the daemon unsubscribes it"
+        reason = "the focus poll is held so that dropping the daemon stops it"
     )]
-    activation: ActivationObserver,
+    focus: Timer,
 }
 
 impl Daemon {
@@ -81,6 +83,7 @@ impl Daemon {
             held: Held::empty(),
             releases: Cell::new(Releases::default()),
             switched_at: Cell::new(None),
+            focused: RefCell::new(None),
             watchdog: OnceCell::new(),
             hold,
         });
@@ -106,15 +109,19 @@ impl Daemon {
         let observing = Rc::clone(&state);
         let observer = tis::observe_changes(move || observing.on_confirmation());
 
-        let activating = Rc::clone(&state);
-        let activation =
-            workspace::observe_activation(move |app| activating.on_activation(app, Instant::now()));
+        let polling = Rc::downgrade(&state);
+        let focus = Timer::install(Repeat::Every(focus::POLL), move || {
+            let Some(state) = polling.upgrade() else {
+                return;
+            };
+            state.on_focus_poll(Instant::now());
+        })?;
 
         Ok(Daemon {
             state,
             tap,
             observer: Some(observer),
-            activation,
+            focus,
         })
     }
 
@@ -124,7 +131,7 @@ impl Daemon {
             state,
             tap: _,
             observer: _,
-            activation: _,
+            focus: _,
         } = self;
         state.releases.get()
     }
@@ -138,7 +145,7 @@ impl Daemon {
             state,
             tap: _,
             observer: _,
-            activation: _,
+            focus: _,
         } = self;
         state.on_activation(app, Instant::now());
     }
@@ -152,7 +159,7 @@ impl Daemon {
             state: _,
             tap: _,
             observer,
-            activation: _,
+            focus: _,
         } = self;
         observer.take();
     }
@@ -181,7 +188,7 @@ impl Daemon {
             state,
             tap,
             observer: _,
-            activation: _,
+            focus: _,
         } = self;
         drop(tap);
         state.release_on_stop();
@@ -229,6 +236,7 @@ struct State {
     watchdog: OnceCell<Timer>,
     hold: Duration,
     switched_at: Cell<Option<Instant>>,
+    focused: RefCell<Option<BundleId>>,
 }
 
 impl State {
@@ -285,7 +293,7 @@ impl State {
     }
 
     fn on_activation(&self, app: BundleId, now: Instant) {
-        tracing::debug!(%app, "the frontmost application changed");
+        tracing::debug!(%app, "the keyboard moved to another application");
         let current = self.current_tag();
         let decided = {
             let Ok(mut memory) = self.memory.try_borrow_mut() else {
@@ -306,24 +314,37 @@ impl State {
         if !accepted {
             return;
         }
-        tracing::debug!(%tag, "the frontmost application asks for a switch");
+        tracing::debug!(%tag, "the application the keyboard moved to asks for a switch");
         self.switched_at.set(Some(now));
         self.arm(self.hold);
         self.select(&tag);
     }
 
     fn seed_frontmost(&self) {
-        let Some(app) = workspace::frontmost() else {
+        let Some(app) = focus::focused() else {
             return;
         };
+        self.focused.replace(Some(app.clone()));
         let Ok(mut memory) = self.memory.try_borrow_mut() else {
             return;
         };
         memory.seed(app);
     }
 
+    fn on_focus_poll(&self, now: Instant) {
+        let moved = {
+            let last = self.focused.borrow();
+            focus::moved(last.as_ref(), focus::focused())
+        };
+        let Some(app) = moved else {
+            return;
+        };
+        self.focused.replace(Some(app.clone()));
+        self.on_activation(app, now);
+    }
+
     fn remember(&self, current: Option<LayoutTag>) {
-        let Some(app) = workspace::frontmost() else {
+        let Some(app) = self.focused.borrow().clone() else {
             return;
         };
         let Ok(mut memory) = self.memory.try_borrow_mut() else {

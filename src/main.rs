@@ -5,9 +5,9 @@ use argh::FromArgs;
 use moji::barrier;
 use moji::config::{self, Config};
 use moji::daemon::{self, Daemon};
+use moji::macos::focus;
 use moji::macos::tap;
 use moji::macos::tis::{self, Layout, LayoutTag};
-use moji::macos::workspace;
 use moji::service::{self, Housing, Installed};
 use tracing_subscriber::EnvFilter;
 
@@ -57,7 +57,7 @@ struct Set {
 #[argh(subcommand, name = "toggle")]
 struct Toggle {}
 
-/// print the current layout, its tag if it has one, and the frontmost application
+/// print the current layout, its tag if it has one, and the application the keyboard goes to
 #[derive(FromArgs, Debug, PartialEq, Eq)]
 #[argh(subcommand, name = "status")]
 struct Status {}
@@ -194,8 +194,8 @@ fn status() -> ExitCode {
         Some(tag) => tag.to_string(),
         None => "-".to_string(),
     };
-    let frontmost = match workspace::frontmost() {
-        Some(frontmost) => frontmost.to_string(),
+    let focused = match focus::focused() {
+        Some(focused) => focused.to_string(),
         None => "-".to_string(),
     };
 
@@ -203,7 +203,7 @@ fn status() -> ExitCode {
     println!("id\t{id}");
     println!("language\t{language}");
     println!("tag\t{tag}");
-    println!("frontmost\t{frontmost}");
+    println!("focused\t{focused}");
     ExitCode::SUCCESS
 }
 

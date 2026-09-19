@@ -18,6 +18,10 @@ TIS is not thread-safe and Apple documents it as main-thread-only. The daemon ha
 
 That shapes anything periodic or asynchronous. A distributed notification is delivered on the main run loop and nowhere else. A `CFRunLoopTimer` that does not repeat is invalidated by its own fire, so a one-shot like the watchdog is a timer whose interval is a day: arming it pushes its next fire date, it is never recreated. A signal handler may not stop a run loop, so SIGTERM sets a flag and a repeating timer polls it - the same shape the upgrade watch in `executable.rs` uses.
 
+## The keyboard's application comes from Accessibility, not from the workspace
+
+Measured on this machine: Tuna's panel takes the keyboard without activating, so `NSWorkspaceDidActivateApplicationNotification` never fires for it and `frontmostApplication` keeps naming the window behind it, while Accessibility's system-wide `AXFocusedApplication` moves to the panel and back. There is no notification for that attribute, so `src/macos/focus.rs` polls it on a 50 ms run-loop timer; the workspace's frontmost application is only the fallback for a poll Accessibility does not answer. An unreadable answer is not a move: the last application stands until a new one is read.
+
 ## The ordering logic is pure
 
 `src/barrier.rs` and `src/memory.rs` take plain data and the clock, and return decisions the `src/macos/` layer executes. The barrier never holds a Core Foundation object and the tap layer owns the queue of held events. That split is what makes the ordering testable with a fake clock.

@@ -25,7 +25,7 @@ ru = "Russian - Universal"
 
 - `[layouts]` maps a short tag to the **localized name** of an enabled keyboard layout, the one `moji list` prints in its first column. Names are matched, never input source IDs: the same layout reports two different IDs depending on which process asks.
 - `cycle` is the order the switch key and `moji toggle` walk, wrapping at the end. A layout outside the cycle, or one no tag names at all, goes to the first entry. The cycle needs at least two entries, and no tag may stand in it twice: selecting the layout that is already selected is confirmed by no notification, so the barrier would wait for the watchdog on every tap.
-- `[apps]` pins a layout to a bundle id. Every application not listed gets the layout it last used, which moji records when the application loses focus and whenever the layout changes. An application whose decided layout is already the selected one is left alone, for the same no-notification reason. A pin fires on the workspace activation notification, so it only reaches applications that become frontmost; `moji status` prints the frontmost bundle id, which is how to find the one to pin.
+- `[apps]` pins a layout to a bundle id. Every application not listed gets the layout it last used, which moji records when the application loses focus and whenever the layout changes. An application whose decided layout is already the selected one is left alone, for the same no-notification reason. Which application the keyboard goes to is asked of Accessibility every 50 ms rather than of the workspace: a launcher such as Tuna shows its panel without activating, so the workspace keeps naming the window behind it while the panel takes the keys, and Accessibility's focused application follows the keys. `moji status` prints that bundle id, which is how to find the one to pin.
 - An unknown field, a tag `[layouts]` does not carry, or a name no enabled layout answers to is an error that names the file, the field and what was expected. `moji --check-config` parses, resolves every tag against the enabled layouts, prints what it made of the file, and exits.
 
 ## The contract with Karabiner
@@ -49,7 +49,7 @@ Two TCC grants, both to the application bundle rather than to a path that change
 moji run          own the switch key and the layout for as long as the process lives
 moji set <tag>    select the layout a tag names
 moji toggle       select the layout after the current one in the cycle
-moji status       print the current layout, its id, language, tag, and the frontmost application
+moji status       print the current layout, its id, language, tag, and the application the keyboard goes to
 moji list         print every enabled keyboard layout as name, id and language
 moji install      run this binary as a launchd agent
 moji uninstall    unload the agent and remove what install wrote
@@ -64,7 +64,7 @@ Everything but `run` is one-shot and talks to Text Input Sources directly: there
 
 ## Logging
 
-`moji run` logs at `info` by default, and a switch that confirmed in time logs nothing: silence is the normal path. Two things are always reported: the watchdog releasing held keys because no confirmation arrived within 50 ms (a `warn` naming how many keys it let go and how many times that happened since start), and a layout that could not be selected. `MOJI_LOG=debug` adds one line per step of every switch: what asked for it (the signal key or a frontmost application), when the confirmation arrived and how many keys were waiting, and when they went through. `MOJI_LOG` takes any `tracing` filter, so `MOJI_LOG=moji::daemon=debug` narrows it to the daemon.
+`moji run` logs at `info` by default, and a switch that confirmed in time logs nothing: silence is the normal path. Two things are always reported: the watchdog releasing held keys because no confirmation arrived within 50 ms (a `warn` naming how many keys it let go and how many times that happened since start), and a layout that could not be selected. `MOJI_LOG=debug` adds one line per step of every switch: what asked for it (the signal key or the application the keyboard moved to), when the confirmation arrived and how many keys were waiting, and when they went through. `MOJI_LOG` takes any `tracing` filter, so `MOJI_LOG=moji::daemon=debug` narrows it to the daemon.
 
 `moji install` writes `~/Library/LaunchAgents/dev.pkarpovich.moji.plist` naming the running binary with its symlinks resolved, and captures the daemon's output in `~/Library/Logs/moji/moji.log` and `moji.err.log` - that is where an installed daemon's log lines go, since launchd gives it no terminal. `moji uninstall` unloads the agent and removes the plist; the logs stay.
 
