@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>moji</title>
+  <rect x="100.0" y="100.0" width="824.0" height="824.0" rx="185.4" fill="#100f0d" />
+  <rect x="473.375" y="164.375" width="77.25" height="128.75" fill="#d0a215" />
+  <g fill="#cecdc3">
+    <rect x="190.125" y="344.625" width="643.75" height="64.375" />
+    <rect x="473.375" y="447.625" width="77.25" height="424.875" transform="rotate(30 512 653.625)" />
+    <rect x="473.375" y="447.625" width="77.25" height="424.875" transform="rotate(-30 512 653.625)" />
+  </g>
+</svg>
