@@ -241,11 +241,19 @@ impl<T> History<T> {
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] verify every point of the Overview and every Non-goal holds in the code
-- [ ] verify the edge cases: F18 with an empty history, F18 during a running switch, a refused select posting nothing, a click and a focus move clearing the history, a layout not in the configuration clearing instead of recording
-- [ ] run `mise run check`
-- [ ] run `./scripts/acceptance.sh`
-- [ ] run `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'`
+- [x] verify every point of the Overview and every Non-goal holds in the code
+- [x] verify the edge cases: F18 with an empty history, F18 during a running switch, a refused select posting nothing, a click and a focus move clearing the history, a layout not in the configuration clearing instead of recording
+- [x] run `mise run check`
+- [x] run `./scripts/acceptance.sh` (its static gates ran and passed; the live scenarios are not automatable in this session, see the note below)
+- [x] run `! grep -rn 'unsafe' src --include='*.rs' | grep -v '^src/macos/'`
+
+The audit, claim by claim:
+
+- Overview: `History::flip` covers the word on the first press and the whole tail on the next, because the marker is `Typed` until a flip sets it to `Flipped` and a `record` sets it back; a flip is `tis::select`, then `tap::post_backspaces(count)`, then `push_stroke` per `history.last(count)`, then the barrier's release, which is exactly `State::on_retype` in `src/daemon.rs`. Nothing in the path reads a keycode's letter.
+- Non-goals: no `UCKeyTranslate` anywhere; the only `keyboard_set_unicode_string` is the v1 measurement helper in `src/macos/harness.rs`, which predates this branch and is test-only; no `AXValue` or `AXSelectedTextRange` read; `RETYPE_KEYCODE` is a `pub const` in `src/barrier.rs` with nothing in `src/config.rs` naming it; no exclusion list exists; `flip` has only the word and the tail, and a third press flips the tail again; `git diff --stat master...HEAD` touches no Karabiner, cask or release file.
+- Edge cases, each with a test that fails if the behaviour goes: empty history - `History::planned` returns `None` and `daemon::tests::a_retype_with_nothing_typed_posts_nothing_and_holds_nothing`; F18 during a running switch or settle - `barrier::tests::the_retype_key_during_a_switch_is_swallowed_and_changes_nothing`, `..._during_the_settle_...`, `a_retype_during_a_switch_is_refused_and_leaves_the_switch_alone`, `a_retype_during_the_settle_is_refused_and_leaves_the_settle_alone`; a refused select - `on_retype` returns before `post_backspaces` and before `flip`, covered by `daemon::tests::a_retype_that_cannot_select_its_layout_leaves_the_history_as_it_was`; a click and a focus move - `daemon::tests::a_click_and_a_caret_key_drop_what_the_history_holds` and `the_keyboard_moving_to_another_application_drops_what_the_history_holds`; a layout no tag names - `History::record` with `None` clears, and `daemon::tests::a_keystroke_typed_in_a_layout_no_tag_names_clears_the_history`.
+
+⚠️ `./scripts/acceptance.sh` passed its release build, its embedded `__TEXT,__info_plist` check and its bundle check, then stopped at the first live scenario - `a_held_keystroke_types_the_letter_of_the_layout_selected_after_it_was_captured`, a v1 scenario untouched by this plan - with the panic Tasks 4 and 6 recorded: "the harness window never became frontmost". The session has no interactive GUI focus, so no live scenario can run here regardless of what it tests. The live half stays for the Post-Completion manual pass on a logged-in machine.
 
 ### Task 8: Update documentation
 
