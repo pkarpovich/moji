@@ -14,6 +14,8 @@ LIVE_TESTS=(
 	letters_typed_immediately_after_the_switch_land_in_the_new_layout
 	a_switch_that_is_never_confirmed_still_releases_the_keys
 	activating_a_pinned_application_selects_its_layout
+	a_sentence_typed_in_the_wrong_layout_is_retyped_word_first_then_whole
+	a_word_typed_before_a_manual_switch_is_retyped_without_a_second_switch
 )
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

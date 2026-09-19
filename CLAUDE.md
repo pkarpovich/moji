@@ -1,6 +1,6 @@
 # moji conventions
 
-`README.md` carries what moji is, its configuration and the contract with Karabiner; this file carries only the rules that govern how code is written here. The plan that built the daemon, with the verified API behaviour behind every decision, is `docs/plans/completed/20260918-moji-layout-daemon.md`.
+`README.md` carries what moji is, its configuration and the contract with Karabiner; this file carries only the rules that govern how code is written here. The plan that built the daemon, with the verified API behaviour behind every decision, is `docs/plans/completed/20260918-moji-layout-daemon.md`, and the one that added the retype key is `docs/plans/completed/20260919-moji-retype-last-word.md`.
 
 ## Everything runs natively on macOS
 
@@ -24,13 +24,23 @@ Measured on this machine: Tuna's panel takes the keyboard without activating, so
 
 ## The ordering logic is pure
 
-`src/barrier.rs` and `src/memory.rs` take plain data and the clock, and return decisions the `src/macos/` layer executes. The barrier never holds a Core Foundation object and the tap layer owns the queue of held events. That split is what makes the ordering testable with a fake clock.
+`src/barrier.rs`, `src/memory.rs`, `src/cycle.rs` and `src/history.rs` take plain data and the clock, and return decisions the `src/macos/` layer executes. The pure modules never know about Core Foundation objects; `History<T>` carries one as an opaque payload, never looking inside it, and the tap layer owns the queue of held events. That split is what makes the ordering and the flip testable with a fake clock and a `History<()>`.
+
+The history is what the retype key reads. `history::action` turns one `KeyEvent` into `Record`, `Erase`, `Clear` or `Ignore`, and the daemon feeds it from the same `on_key` that drives the barrier: a letter or a space is recorded under the tag the daemon has cached for the selected layout, Delete erases the last entry, and a click, a caret key, a chord carrying `barrier::CHORD` (Command, Control or Option), a key that types no letter at all such as a function key, a layout no tag names and the keyboard moving to another application all clear it. The invariant that rule protects is one entry per character on screen: a keystroke moji cannot account for exactly is one it could never retype, so it clears rather than records - otherwise the backspaces a flip posts eat text the user did type. That invariant is also what a tag in `[layouts]` promises: only a source that types one character per keystroke belongs in the configuration, because moji counts keystrokes and never characters. A dead key that waits for the letter after it, or an input method that composes a character out of several keystrokes, would make one character out of two entries; left unnamed, such a source clears the history on every keystroke through `record` with no tag, which is the only reason the daemon needs no knowledge of it. The two signal keys are `Ignore`: they are moji's, not the text's, and a retype press carrying a chord is refused before it reaches the history.
+
+A flip is select first, then delete, then replay. `History::planned` answers what the next flip would cover without touching the history, `State::on_retype` selects that layout and returns on a refusal, and only a selection TIS accepted reaches `History::flip`, the deletions and the strokes pushed onto the held queue for the barrier's release. That order is what leaves the text exactly as the user typed it when the layout cannot be selected.
+
+Inside that order, everything that can fail is built before anything is posted: `Deletions::built` makes every backspace stroke up front and `Held::push_strokes` copies every replacement before it touches the queue, so an allocation that fails posts nothing at all instead of leaving the text deleted with no replacement coming. A half-applied flip is worse than a refused one, and the deletions go out only once the replacements are queued.
 
 ## A replayed event is the captured one, unchanged
 
 Measured on this machine, and the reason the tap layer carries no keycode translation: re-posting the very `CGEvent` a tap captured before the switch types the letter of the layout selected **after** the capture. A captured event carrying the unicode string `"a"`, posted once Russian was selected, typed `ф`. The receiving application re-translates the keycode against the current source and ignores the unicode string the event carries.
 
+That is also why the tap's mask carries the three mouse-down types next to the keyboard ones: a click moves the caret somewhere the history cannot follow, so the tap reports it as `EventKind::MouseDown`, which passes through the barrier untouched and clears the history.
+
 So `HeldEvent` is a `CGEventCreateCopy` posted as it is, plus a magic value written into `kCGEventSourceUserData`. That magic is what keeps the tap from re-entering the barrier on its own replays, and it is the only thing a replayed event carries that the captured one did not. Do not add `CGEventKeyboardSetUnicodeString`, and do not reach for `UCKeyTranslate`: nothing needs moji to know which letter a keycode makes.
+
+Two of the events a retype posts are not captured ones. The history keeps key-downs only, so `Held::push_strokes` queues, for each captured stroke, a duplicate of the down plus a second duplicate whose type `CGEvent::set_type` turns into the up; and the deletions are fresh keycode-51 pairs built by `Deletions::built`, marked with the same magic. Changing a copy's *type* and synthesizing a backspace is allowed; changing which letter an event claims to type is not.
 
 That is also why the confirmation alone is not the moment to replay. Since the letter is decided in the *receiving* process, and the distributed notification that carries the switch reaches that process after it reaches moji, the barrier answers a matching confirmation with `Settling` rather than a replay: the held events wait `barrier::SETTLE` (10 ms) longer, and keys arriving inside that window queue behind them so the order the user typed in survives. The in-process live harness cannot prove this - its window and its observer share moji's process, where the lag is zero by construction - so the settle is verified by typing into a real chat window, which is a Post-Completion item of the plan.
 

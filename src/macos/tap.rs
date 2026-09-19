@@ -1,7 +1,9 @@
 //! The session event tap: the only thing between a keystroke and the application that types it.
 //!
-//! The tap sees `keyDown`, `keyUp` and `flagsChanged` at the session level with head insert, so it
-//! is downstream of Karabiner's virtual keyboard and upstream of every application. It hands each
+//! The tap sees `keyDown`, `keyUp`, `flagsChanged` and the three mouse-down types at the session
+//! level with head insert, so it is downstream of Karabiner's virtual keyboard and upstream of
+//! every application. A click is reported so the history knows the caret moved, and is always
+//! passed on. It hands each
 //! event to the barrier as plain data, and executes the verdict that comes back: pass it on,
 //! swallow it, or keep a retained copy until the layout change is confirmed. A replayed event
 //! carries moji's magic in its source user data, so the tap lets its own replays straight through
@@ -25,7 +27,12 @@ use crate::barrier::{EventKind, KeyEvent, Stroke, Verdict};
 
 const KEYBOARD_MASK: CGEventMask = (1 << CGEventType::KeyDown.0)
     | (1 << CGEventType::KeyUp.0)
-    | (1 << CGEventType::FlagsChanged.0);
+    | (1 << CGEventType::FlagsChanged.0)
+    | (1 << CGEventType::LeftMouseDown.0)
+    | (1 << CGEventType::RightMouseDown.0)
+    | (1 << CGEventType::OtherMouseDown.0);
+
+const BACKSPACE_KEYCODE: u16 = 51;
 
 /// The source user data moji writes into a replayed event so its own tap recognizes it.
 pub const REPLAY_MAGIC: i64 = 0x6d6f_6a69;
@@ -74,8 +81,25 @@ pub enum TapError {
 /// A keyboard event moji kept back, retained so it can be posted once the layout is confirmed.
 pub struct HeldEvent(CFRetained<CGEvent>);
 
-enum Kept {
+impl HeldEvent {
+    /// Returns a retained copy of the event a tap carried, or nothing when the copy fails.
+    pub fn capture(event: &CGEvent) -> Option<HeldEvent> {
+        let event = CGEvent::new_copy(Some(event))?;
+        Some(HeldEvent(event))
+    }
+
+    /// Returns another retained copy of this event, or nothing when the copy fails.
+    pub fn duplicate(&self) -> Option<HeldEvent> {
+        let HeldEvent(event) = self;
+        HeldEvent::capture(event)
+    }
+}
+
+/// Whether an event reached the queue that holds it back.
+pub enum Kept {
+    /// The queue carries it now.
     Yes,
+    /// Copying the event or reaching the queue failed, so the queue is unchanged.
     No,
 }
 
@@ -125,6 +149,35 @@ impl Held {
     /// Returns whether nothing is waiting to be replayed.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Pushes the keyDown of every captured stroke and its matching keyUp, in that order.
+    ///
+    /// Every copy is made before the queue is touched, so a copy that fails leaves the queue
+    /// exactly as it was rather than holding half of what was asked for.
+    pub fn push_strokes(&self, events: &[&HeldEvent]) -> Kept {
+        let mut strokes = Vec::new();
+        for event in events {
+            let Some(down) = event.duplicate() else {
+                return Kept::No;
+            };
+            let Some(up) = event.duplicate() else {
+                return Kept::No;
+            };
+            let HeldEvent(raised) = &up;
+            CGEvent::set_type(Some(raised), CGEventType::KeyUp);
+            strokes.push(down);
+            strokes.push(up);
+        }
+
+        let Held(queue) = self;
+        let Ok(mut queue) = queue.try_borrow_mut() else {
+            return Kept::No;
+        };
+        for stroke in strokes {
+            queue.push(stroke);
+        }
+        Kept::Yes
     }
 
     fn keep(&self, event: &CGEvent) -> Kept {
@@ -281,7 +334,48 @@ fn kind_of(kind: CGEventType) -> Option<EventKind> {
     if kind == CGEventType::FlagsChanged {
         return Some(EventKind::Flags);
     }
+    if kind == CGEventType::LeftMouseDown
+        || kind == CGEventType::RightMouseDown
+        || kind == CGEventType::OtherMouseDown
+    {
+        return Some(EventKind::MouseDown);
+    }
     None
+}
+
+fn backspace_pair() -> Option<(CFRetained<CGEvent>, CFRetained<CGEvent>)> {
+    let down = CGEvent::new_keyboard_event(None, BACKSPACE_KEYCODE, true)?;
+    let up = CGEvent::new_keyboard_event(None, BACKSPACE_KEYCODE, false)?;
+    mark_replayed(&down);
+    mark_replayed(&up);
+    Some((down, up))
+}
+
+/// The backspace strokes a retype deletes with, all built before any of them goes out.
+pub struct Deletions(Vec<HeldEvent>);
+
+impl Deletions {
+    /// Returns the strokes that delete `count` characters, or nothing when building one fails.
+    ///
+    /// Every stroke is built up front, so a failure posts nothing at all instead of leaving the
+    /// text with some of the characters deleted and no replacement coming.
+    pub fn built(count: usize) -> Option<Deletions> {
+        let mut strokes = Vec::new();
+        for _ in 0..count {
+            let (down, up) = backspace_pair()?;
+            strokes.push(HeldEvent(down));
+            strokes.push(HeldEvent(up));
+        }
+        Some(Deletions(strokes))
+    }
+
+    /// Posts every stroke to the session tap, marked so moji's own tap passes it on.
+    pub fn post(self) {
+        let Deletions(strokes) = self;
+        for HeldEvent(event) in &strokes {
+            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+        }
+    }
 }
 
 fn user_data(event: &CGEvent) -> i64 {
@@ -349,9 +443,15 @@ unsafe extern "C-unwind" fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_graphics::CGEventFlags;
+
     use super::*;
 
     const KEYCODE_A: u16 = 0;
+
+    fn keycode_of(event: &CGEvent) -> i64 {
+        CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode)
+    }
 
     fn keyboard_event(keycode: u16, down: bool) -> CFRetained<CGEvent> {
         let Some(event) = CGEvent::new_keyboard_event(None, keycode, down) else {
@@ -527,6 +627,156 @@ mod tests {
         assert_eq!(other.len(), 1);
         assert_eq!(other.drain().len(), 1);
         assert!(held.is_empty());
+    }
+
+    #[test]
+    fn every_mouse_down_reads_as_a_mouse_down_event() {
+        for kind in [
+            CGEventType::LeftMouseDown,
+            CGEventType::RightMouseDown,
+            CGEventType::OtherMouseDown,
+        ] {
+            let event = keyboard_event(KEYCODE_A, true);
+            CGEvent::set_type(Some(&event), kind);
+
+            let Some(KeyEvent {
+                kind,
+                keycode: _,
+                flags: _,
+                timestamp: _,
+                stroke: _,
+            }) = key_event(&event)
+            else {
+                panic!("a mouse-down event is not a key event");
+            };
+
+            assert_eq!(kind, EventKind::MouseDown);
+        }
+    }
+
+    #[test]
+    fn a_captured_event_is_a_copy_carrying_the_same_keycode_and_flags() {
+        let event = keyboard_event(7, true);
+        CGEvent::set_flags(Some(&event), CGEventFlags::MaskShift);
+
+        let Some(captured) = HeldEvent::capture(&event) else {
+            panic!("capturing a keyboard event failed");
+        };
+        let Some(duplicate) = captured.duplicate() else {
+            panic!("duplicating a captured event failed");
+        };
+
+        let HeldEvent(captured) = &captured;
+        let HeldEvent(duplicate) = &duplicate;
+        assert_eq!(keycode_of(captured), 7);
+        assert_eq!(keycode_of(duplicate), 7);
+        assert_eq!(
+            CGEvent::flags(Some(duplicate)).bits(),
+            CGEventFlags::MaskShift.bits()
+        );
+        assert!(!std::ptr::eq(&raw const *captured, &raw const *duplicate));
+    }
+
+    #[test]
+    fn a_captured_event_survives_its_source_being_dropped() {
+        let captured = {
+            let event = keyboard_event(7, true);
+            let Some(captured) = HeldEvent::capture(&event) else {
+                panic!("capturing a keyboard event failed");
+            };
+            captured
+        };
+
+        let HeldEvent(event) = &captured;
+        assert_eq!(keycode_of(event), 7);
+    }
+
+    #[test]
+    fn a_pushed_stroke_is_a_key_down_then_a_key_up_of_the_same_key() {
+        let held = Held::empty();
+        let Some(captured) = HeldEvent::capture(&keyboard_event(7, true)) else {
+            panic!("capturing a keyboard event failed");
+        };
+
+        let Kept::Yes = held.push_strokes(&[&captured]) else {
+            panic!("pushing a captured stroke into the queue failed");
+        };
+
+        let drained = held.drain();
+        let mut strokes = Vec::new();
+        for HeldEvent(event) in &drained {
+            strokes.push((CGEvent::r#type(Some(event)), keycode_of(event)));
+        }
+
+        assert_eq!(
+            strokes,
+            vec![(CGEventType::KeyDown, 7), (CGEventType::KeyUp, 7)]
+        );
+    }
+
+    #[test]
+    fn a_pushed_stroke_leaves_the_captured_event_a_key_down() {
+        let held = Held::empty();
+        let Some(captured) = HeldEvent::capture(&keyboard_event(7, true)) else {
+            panic!("capturing a keyboard event failed");
+        };
+
+        let Kept::Yes = held.push_strokes(&[&captured, &captured]) else {
+            panic!("pushing a captured stroke into the queue failed");
+        };
+
+        let HeldEvent(event) = &captured;
+        assert_eq!(CGEvent::r#type(Some(event)), CGEventType::KeyDown);
+        assert_eq!(held.len(), 4);
+    }
+
+    #[test]
+    fn every_deletion_is_built_before_any_of_them_is_posted() {
+        let Some(Deletions(strokes)) = Deletions::built(3) else {
+            panic!("building the deletions failed");
+        };
+
+        let mut built = Vec::new();
+        for HeldEvent(event) in &strokes {
+            built.push((CGEvent::r#type(Some(event)), keycode_of(event)));
+            assert!(is_replayed(user_data(event)));
+        }
+
+        let keycode = i64::from(BACKSPACE_KEYCODE);
+        assert_eq!(
+            built,
+            vec![
+                (CGEventType::KeyDown, keycode),
+                (CGEventType::KeyUp, keycode),
+                (CGEventType::KeyDown, keycode),
+                (CGEventType::KeyUp, keycode),
+                (CGEventType::KeyDown, keycode),
+                (CGEventType::KeyUp, keycode),
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_to_delete_builds_no_stroke_at_all() {
+        let Some(Deletions(strokes)) = Deletions::built(0) else {
+            panic!("building no deletion at all failed");
+        };
+
+        assert!(strokes.is_empty());
+    }
+
+    #[test]
+    fn a_backspace_pair_is_keycode_fifty_one_marked_as_a_replay() {
+        let Some((down, up)) = backspace_pair() else {
+            panic!("creating a backspace pair failed");
+        };
+
+        assert_eq!(keycode_of(&down), i64::from(BACKSPACE_KEYCODE));
+        assert_eq!(keycode_of(&up), i64::from(BACKSPACE_KEYCODE));
+        assert_eq!(CGEvent::r#type(Some(&down)), CGEventType::KeyDown);
+        assert_eq!(CGEvent::r#type(Some(&up)), CGEventType::KeyUp);
+        assert!(is_replayed(user_data(&down)));
+        assert!(is_replayed(user_data(&up)));
     }
 
     #[test]

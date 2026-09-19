@@ -6,8 +6,10 @@
 
 pub mod barrier;
 pub mod config;
+pub mod cycle;
 pub mod daemon;
 pub mod executable;
+pub mod history;
 pub mod macos;
 pub mod memory;
 pub mod service;
