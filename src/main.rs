@@ -9,6 +9,7 @@ use moji::macos::tap;
 use moji::macos::tis::{self, Layout, LayoutTag};
 use moji::macos::workspace;
 use moji::service::{self, Housing, Installed};
+use tracing_subscriber::EnvFilter;
 
 const SUBCOMMANDS: &str = "run, set, toggle, status, list, install, uninstall";
 
@@ -76,8 +77,18 @@ struct Install {}
 #[argh(subcommand, name = "uninstall")]
 struct Uninstall {}
 
+/// The environment variable that sets the log filter; `info` when it is unset.
+const LOG_VAR: &str = "MOJI_LOG";
+
 fn main() -> ExitCode {
-    tracing_subscriber::fmt().with_target(false).init();
+    let filter = match EnvFilter::try_from_env(LOG_VAR) {
+        Ok(filter) => filter,
+        Err(_) => EnvFilter::new("info"),
+    };
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_env_filter(filter)
+        .init();
 
     let Args {
         version,

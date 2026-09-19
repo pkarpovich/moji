@@ -80,6 +80,7 @@ impl Daemon {
             layouts,
             held: Held::empty(),
             releases: Cell::new(Releases::default()),
+            switched_at: Cell::new(None),
             watchdog: OnceCell::new(),
             hold,
         });
@@ -227,6 +228,7 @@ struct State {
     releases: Cell<Releases>,
     watchdog: OnceCell<Timer>,
     hold: Duration,
+    switched_at: Cell<Option<Instant>>,
 }
 
 impl State {
@@ -250,6 +252,8 @@ impl State {
         let Some(tag) = select else {
             return verdict;
         };
+        tracing::debug!(%tag, "the signal key asks for a switch");
+        self.switched_at.set(Some(now));
         self.arm(self.hold);
         self.select(&tag);
         verdict
@@ -263,15 +267,24 @@ impl State {
             let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
                 return;
             };
-            barrier.confirmed(current, Instant::now())
+            barrier.confirmed(current.clone(), Instant::now())
         };
         match confirmed {
             Confirmed::Nothing => {}
-            Confirmed::Settling => self.arm(SETTLE),
+            Confirmed::Settling => {
+                tracing::debug!(
+                    layout = ?current,
+                    waited_ms = self.since_switch_ms(),
+                    held = self.held_count(),
+                    "the switch is confirmed, settling before the held keys go through"
+                );
+                self.arm(SETTLE);
+            }
         }
     }
 
     fn on_activation(&self, app: BundleId, now: Instant) {
+        tracing::debug!(%app, "the frontmost application changed");
         let current = self.current_tag();
         let decided = {
             let Ok(mut memory) = self.memory.try_borrow_mut() else {
@@ -292,6 +305,8 @@ impl State {
         if !accepted {
             return;
         }
+        tracing::debug!(%tag, "the frontmost application asks for a switch");
+        self.switched_at.set(Some(now));
         self.arm(self.hold);
         self.select(&tag);
     }
@@ -328,13 +343,26 @@ impl State {
         match elapsed {
             Elapsed::Nothing => {}
             Elapsed::Waiting(left) => self.arm(left),
-            Elapsed::Settled => self.release(),
+            Elapsed::Settled => {
+                tracing::debug!(
+                    held = waiting,
+                    total_ms = self.since_switch_ms(),
+                    "the held keys go through in the new layout"
+                );
+                self.release();
+            }
             Elapsed::Unconfirmed => {
                 let Releases { count, last: _ } = self.releases.get();
                 self.releases.set(Releases {
                     count: count + 1,
                     last: waiting,
                 });
+                tracing::warn!(
+                    held = waiting,
+                    waited_ms = self.hold.as_millis(),
+                    releases = count + 1,
+                    "no confirmation arrived in time, so the held keys go through as they are"
+                );
                 self.release();
             }
         }
@@ -380,6 +408,20 @@ impl State {
             "moji stops with events still held, so they go out before it does"
         );
         self.release();
+    }
+
+    fn since_switch_ms(&self) -> u128 {
+        let Some(switched_at) = self.switched_at.get() else {
+            return 0;
+        };
+        switched_at.elapsed().as_millis()
+    }
+
+    fn held_count(&self) -> usize {
+        let Ok(barrier) = self.barrier.try_borrow() else {
+            return 0;
+        };
+        barrier.held()
     }
 
     fn arm(&self, after: Duration) {
