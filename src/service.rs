@@ -68,6 +68,12 @@ pub enum ServiceError {
         /// The agent it refused.
         path: PathBuf,
     },
+    /// `launchctl` ran and the job is still loaded after the wait.
+    #[error("{label} is still loaded, so launchctl refused to unload it")]
+    Bootout {
+        /// The label that would not go away.
+        label: String,
+    },
 }
 
 /// Whether the running binary sits inside an application bundle.
@@ -122,15 +128,20 @@ pub fn layout(home: &Path) -> Layout {
 ///
 /// Returns [`ServiceError::NoHome`] when `HOME` is not set, [`ServiceError::Executable`] when the
 /// running binary cannot be located, [`ServiceError::Directory`] or [`ServiceError::Write`] when
-/// the agent cannot be written, and [`ServiceError::Launchctl`] or [`ServiceError::Bootstrap`]
-/// when launchd refuses to load it.
+/// the agent cannot be written, [`ServiceError::Bootout`] when a job already loaded under the
+/// label will not go away, and [`ServiceError::Launchctl`] or [`ServiceError::Bootstrap`] when
+/// launchd refuses to load it.
 pub fn install() -> Result<Installed, ServiceError> {
     let home = home_dir()?;
     let layout = layout(&home);
     let program = executable()?;
 
     unload(LABEL)?;
-    wait_unloaded(LABEL);
+    let Unloaded::Yes = wait_unloaded(LABEL)? else {
+        return Err(ServiceError::Bootout {
+            label: LABEL.to_string(),
+        });
+    };
 
     let Layout { agent, log, errors } = &layout;
     create_dir(parent_of(agent))?;
@@ -155,12 +166,20 @@ pub fn install() -> Result<Installed, ServiceError> {
 /// # Errors
 ///
 /// Returns [`ServiceError::NoHome`] when `HOME` is not set, [`ServiceError::Launchctl`] when
-/// launchctl cannot be run, and [`ServiceError::Remove`] when the agent file cannot be removed.
+/// launchctl cannot be run, [`ServiceError::Bootout`] when the job is still loaded after the
+/// wait - the agent is left in place then, so a retry still has something to unload - and
+/// [`ServiceError::Remove`] when the agent file cannot be removed.
 pub fn uninstall() -> Result<Layout, ServiceError> {
     let home = home_dir()?;
     let layout = layout(&home);
 
     unload(LABEL)?;
+    let Unloaded::Yes = wait_unloaded(LABEL)? else {
+        return Err(ServiceError::Bootout {
+            label: LABEL.to_string(),
+        });
+    };
+
     let Layout {
         agent,
         log: _,
@@ -175,23 +194,27 @@ fn executable() -> Result<PathBuf, ServiceError> {
     std::fs::canonicalize(program).map_err(|source| ServiceError::Executable { source })
 }
 
-fn wait_unloaded(label: &str) {
+enum Unloaded {
+    Yes,
+    No,
+}
+
+fn wait_unloaded(label: &str) -> Result<Unloaded, ServiceError> {
     let target = format!("gui/{}/{label}", user::uid());
     let deadline = Instant::now() + UNLOAD_TIMEOUT;
     while Instant::now() < deadline {
-        let printed = Command::new(LAUNCHCTL)
+        let status = Command::new(LAUNCHCTL)
             .args(["print", &target])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
-        let Ok(status) = printed else {
-            return;
-        };
+            .status()
+            .map_err(|source| ServiceError::Launchctl { source })?;
         if !status.success() {
-            return;
+            return Ok(Unloaded::Yes);
         }
         thread::sleep(UNLOAD_POLL);
     }
+    Ok(Unloaded::No)
 }
 
 fn housing(program: &Path) -> Housing {

@@ -51,10 +51,6 @@ pub enum StartError {
 /// Everything moji runs on the main thread's run loop.
 pub struct Daemon {
     state: Rc<State>,
-    #[allow(
-        dead_code,
-        reason = "the tap is held so that dropping the daemon stops watching the keyboard"
-    )]
     tap: Tap,
     observer: Option<ChangeObserver>,
     #[allow(
@@ -162,6 +158,9 @@ impl Daemon {
 
     /// Runs the main run loop until SIGTERM arrives or the binary is replaced under it.
     ///
+    /// The tap goes down before the events it still holds are posted: a replay travels through
+    /// every session tap, and moji's own answers from a run loop that has already stopped.
+    ///
     /// # Errors
     ///
     /// Returns [`StartError::Timer`] when the timer that watches for SIGTERM, or the one that
@@ -176,6 +175,15 @@ impl Daemon {
         })?;
 
         CFRunLoop::run();
+
+        let Daemon {
+            state,
+            tap,
+            observer: _,
+            activation: _,
+        } = self;
+        drop(tap);
+        state.release_on_stop();
 
         drop(upgrade);
         drop(stopper);
@@ -361,6 +369,17 @@ impl State {
     fn release(&self) {
         self.disarm();
         self.held.replay();
+    }
+
+    fn release_on_stop(&self) {
+        if self.held.is_empty() {
+            return;
+        }
+        tracing::info!(
+            held = self.held.len(),
+            "moji stops with events still held, so they go out before it does"
+        );
+        self.release();
     }
 
     fn arm(&self, after: Duration) {
