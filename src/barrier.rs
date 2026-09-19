@@ -11,7 +11,7 @@ use crate::cycle::next;
 use crate::macos::tis::LayoutTag;
 
 /// The virtual keycode of F19, the key Karabiner emits on a tap and moji swallows.
-pub const SIGNAL_KEYCODE: u16 = 80;
+pub const SWITCH_KEYCODE: u16 = 80;
 
 /// The virtual keycode of F18, the key Karabiner emits to ask for a retype and moji swallows.
 pub const RETYPE_KEYCODE: u16 = 79;
@@ -73,34 +73,45 @@ pub enum Verdict {
     Hold,
 }
 
+/// What the barrier asks the daemon to do besides executing the verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    /// Nothing: the event started neither a switch nor a retype.
+    Nothing,
+    /// Select this layout: the event started a switch.
+    Select(LayoutTag),
+    /// Retype what was typed last, in the other layout.
+    Retype,
+}
+
 /// Everything the barrier decided about one event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     /// What to do with the event itself.
     pub verdict: Verdict,
-    /// The layout to select, when the event started a switch.
-    pub select: Option<LayoutTag>,
+    /// What the event asks the daemon for beyond its own verdict.
+    pub request: Request,
 }
 
 impl Decision {
     fn pass() -> Decision {
         Decision {
             verdict: Verdict::Pass,
-            select: None,
+            request: Request::Nothing,
         }
     }
 
     fn swallow() -> Decision {
         Decision {
             verdict: Verdict::Swallow,
-            select: None,
+            request: Request::Nothing,
         }
     }
 
     fn hold() -> Decision {
         Decision {
             verdict: Verdict::Hold,
-            select: None,
+            request: Request::Nothing,
         }
     }
 }
@@ -127,10 +138,16 @@ pub enum Elapsed {
     Unconfirmed,
 }
 
-enum Signal {
+enum Phase {
     Press,
     Repeat,
     Release,
+}
+
+enum Signal {
+    Switch(Phase),
+    Retype(Phase),
+    Mouse,
     Other,
 }
 
@@ -193,9 +210,17 @@ impl Barrier {
         now: Instant,
     ) -> Decision {
         match classify(event) {
-            Signal::Press => self.start_switch(current, now),
-            Signal::Repeat => Decision::swallow(),
-            Signal::Release => Decision::swallow(),
+            Signal::Switch(phase) => match phase {
+                Phase::Press => self.start_switch(current, now),
+                Phase::Repeat => Decision::swallow(),
+                Phase::Release => Decision::swallow(),
+            },
+            Signal::Retype(phase) => match phase {
+                Phase::Press => self.ask_retype(),
+                Phase::Repeat => Decision::swallow(),
+                Phase::Release => Decision::swallow(),
+            },
+            Signal::Mouse => Decision::pass(),
             Signal::Other => self.hold_or_pass(),
         }
     }
@@ -224,6 +249,37 @@ impl Barrier {
         self.state = State::Selecting {
             expected,
             deadline: now + self.hold,
+        };
+        true
+    }
+
+    /// Announces a retype the daemon is about to post, and returns whether it may proceed.
+    ///
+    /// The queue the retype fills is already full when the switch starts, so `held` is the number
+    /// of events waiting before a single key of the user's has arrived. A switch that is already
+    /// running owns its window, so this is refused while one is running and while its held events
+    /// are settling.
+    pub fn on_retype(&mut self, target: LayoutTag, held: usize, now: Instant) -> bool {
+        match &self.state {
+            State::Idle => {}
+            State::Switching {
+                expected: _,
+                deadline: _,
+                held: _,
+            } => return false,
+            State::Selecting {
+                expected: _,
+                deadline: _,
+            } => {}
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => return false,
+        }
+        self.state = State::Switching {
+            expected: target,
+            deadline: now + self.hold,
+            held,
         };
         true
     }
@@ -360,7 +416,36 @@ impl Barrier {
         };
         Decision {
             verdict: Verdict::Swallow,
-            select: Some(next),
+            request: Request::Select(next),
+        }
+    }
+
+    fn ask_retype(&mut self) -> Decision {
+        match &self.state {
+            State::Idle => {}
+            State::Switching {
+                expected,
+                deadline: _,
+                held: _,
+            } => {
+                tracing::debug!(%expected, "a switch is already running, so the retype is refused");
+                return Decision::swallow();
+            }
+            State::Selecting {
+                expected: _,
+                deadline: _,
+            } => {}
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => {
+                tracing::debug!("the held keys are settling, so the retype is refused");
+                return Decision::swallow();
+            }
+        }
+        Decision {
+            verdict: Verdict::Swallow,
+            request: Request::Retype,
         }
     }
 
@@ -395,18 +480,22 @@ fn classify(event: KeyEvent) -> Signal {
         timestamp: _,
         stroke,
     } = event;
-    if keycode != SIGNAL_KEYCODE {
-        return Signal::Other;
-    }
-    match kind {
+    let phase = match kind {
         EventKind::Down => match stroke {
-            Stroke::First => Signal::Press,
-            Stroke::Repeat => Signal::Repeat,
+            Stroke::First => Phase::Press,
+            Stroke::Repeat => Phase::Repeat,
         },
-        EventKind::Up => Signal::Release,
-        EventKind::Flags => Signal::Other,
-        EventKind::MouseDown => Signal::Other,
+        EventKind::Up => Phase::Release,
+        EventKind::Flags => return Signal::Other,
+        EventKind::MouseDown => return Signal::Mouse,
+    };
+    if keycode == SWITCH_KEYCODE {
+        return Signal::Switch(phase);
     }
+    if keycode == RETYPE_KEYCODE {
+        return Signal::Retype(phase);
+    }
+    Signal::Other
 }
 
 #[cfg(test)]
@@ -433,56 +522,76 @@ mod tests {
         }
     }
 
-    fn signal_repeat() -> KeyEvent {
+    fn switch_repeat() -> KeyEvent {
         KeyEvent {
             stroke: Stroke::Repeat,
-            ..signal_down()
+            ..switch_down()
         }
     }
 
-    fn signal_down() -> KeyEvent {
-        key(EventKind::Down, SIGNAL_KEYCODE)
+    fn switch_down() -> KeyEvent {
+        key(EventKind::Down, SWITCH_KEYCODE)
     }
 
-    fn signal_up() -> KeyEvent {
-        key(EventKind::Up, SIGNAL_KEYCODE)
+    fn switch_up() -> KeyEvent {
+        key(EventKind::Up, SWITCH_KEYCODE)
+    }
+
+    fn retype_down() -> KeyEvent {
+        key(EventKind::Down, RETYPE_KEYCODE)
+    }
+
+    fn retype_repeat() -> KeyEvent {
+        KeyEvent {
+            stroke: Stroke::Repeat,
+            ..retype_down()
+        }
+    }
+
+    fn retype_up() -> KeyEvent {
+        key(EventKind::Up, RETYPE_KEYCODE)
+    }
+
+    fn mouse_down() -> KeyEvent {
+        key(EventKind::MouseDown, 0)
     }
 
     #[test]
-    fn a_held_signal_key_repeating_is_swallowed_and_switches_nothing() {
+    fn a_held_switch_key_repeating_is_swallowed_and_switches_nothing() {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision { verdict, select } = barrier.on_key(signal_repeat(), Some(tag("en")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_repeat(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(
-            select, None,
+            request,
+            Request::Nothing,
             "a globe held for a moment would otherwise toggle the layout on every autorepeat"
         );
         assert_eq!(barrier.held(), 0);
     }
 
     #[test]
-    fn the_signal_key_in_idle_swallows_and_selects_the_next_layout() {
+    fn the_switch_key_in_idle_swallows_and_selects_the_next_layout() {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("en")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_down(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
-        assert_eq!(select, Some(tag("ru")));
+        assert_eq!(request, Request::Select(tag("ru")));
     }
 
     #[test]
-    fn the_signal_key_coming_up_is_swallowed_and_selects_nothing() {
+    fn the_switch_key_coming_up_is_swallowed_and_selects_nothing() {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision { verdict, select } = barrier.on_key(signal_up(), Some(tag("en")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_up(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
     }
 
     #[test]
@@ -490,25 +599,25 @@ mod tests {
         let mut barrier = barrier();
         let now = Instant::now();
 
-        let Decision { verdict, select } =
+        let Decision { verdict, request } =
             barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Pass);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
         assert_eq!(barrier.held(), 0);
     }
 
     #[test]
-    fn keys_after_the_signal_are_held_and_the_settle_after_the_confirmation_replays_them() {
+    fn keys_after_the_switch_are_held_and_the_settle_after_the_confirmation_replays_them() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
 
         for keycode in [0u16, 1, 2] {
-            let Decision { verdict, select } =
+            let Decision { verdict, request } =
                 barrier.on_key(key(EventKind::Down, keycode), Some(tag("en")), now);
             assert_eq!(verdict, Verdict::Hold);
-            assert_eq!(select, None);
+            assert_eq!(request, Request::Nothing);
         }
         assert_eq!(barrier.held(), 3);
 
@@ -523,7 +632,7 @@ mod tests {
     fn the_confirmation_does_not_replay_before_the_settle_has_passed() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         barrier.confirmed(Some(tag("ru")), now);
@@ -539,18 +648,18 @@ mod tests {
     fn a_key_arriving_during_the_settle_is_held_and_replays_with_the_rest() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
         barrier.confirmed(Some(tag("ru")), now);
 
-        let Decision { verdict, select } = barrier.on_key(
+        let Decision { verdict, request } = barrier.on_key(
             key(EventKind::Down, 1),
             Some(tag("ru")),
             now + Duration::from_millis(5),
         );
 
         assert_eq!(verdict, Verdict::Hold);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
         assert_eq!(barrier.held(), 2);
         assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
     }
@@ -559,7 +668,7 @@ mod tests {
     fn a_second_confirmation_during_the_settle_changes_nothing() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
         barrier.confirmed(Some(tag("ru")), now);
 
@@ -572,7 +681,7 @@ mod tests {
     fn an_activation_select_during_the_settle_is_refused() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
         barrier.confirmed(Some(tag("ru")), now);
 
@@ -582,17 +691,17 @@ mod tests {
     }
 
     #[test]
-    fn the_signal_key_during_the_settle_is_swallowed_and_not_queued() {
+    fn the_switch_key_during_the_settle_is_swallowed_and_not_queued() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
         barrier.confirmed(Some(tag("ru")), now);
 
-        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("ru")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_down(), Some(tag("ru")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
         assert_eq!(barrier.held(), 1);
     }
 
@@ -600,26 +709,28 @@ mod tests {
     fn flags_events_are_held_like_keys() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
 
-        let Decision { verdict, select: _ } =
-            barrier.on_key(key(EventKind::Flags, 56), Some(tag("en")), now);
+        let Decision {
+            verdict,
+            request: _,
+        } = barrier.on_key(key(EventKind::Flags, 56), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Hold);
         assert_eq!(barrier.held(), 1);
     }
 
     #[test]
-    fn a_second_signal_inside_the_window_is_swallowed_and_not_queued() {
+    fn a_second_switch_inside_the_window_is_swallowed_and_not_queued() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
-        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("en")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_down(), Some(tag("en")), now);
 
         assert_eq!(verdict, Verdict::Swallow);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
         assert_eq!(barrier.held(), 1);
     }
 
@@ -627,7 +738,7 @@ mod tests {
     fn the_deadline_replays_what_was_held() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 1), Some(tag("en")), now);
 
@@ -645,7 +756,7 @@ mod tests {
     fn a_select_failure_replays_at_once() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         assert!(barrier.select_failed());
@@ -656,7 +767,7 @@ mod tests {
     fn a_confirmation_naming_another_layout_does_not_replay_and_the_deadline_still_fires() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         assert_eq!(barrier.confirmed(Some(tag("en")), now), Confirmed::Nothing);
@@ -670,7 +781,7 @@ mod tests {
     fn a_confirmation_of_an_unmapped_layout_never_matches() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         assert_eq!(barrier.confirmed(None, now), Confirmed::Nothing);
@@ -694,25 +805,27 @@ mod tests {
 
         assert!(barrier.on_select(tag("en"), now));
 
-        let Decision { verdict, select } =
+        let Decision { verdict, request } =
             barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
         assert_eq!(verdict, Verdict::Pass);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
         assert_eq!(barrier.held(), 0);
     }
 
     #[test]
-    fn the_signal_key_during_an_activation_select_starts_a_real_switch() {
+    fn the_switch_key_during_an_activation_select_starts_a_real_switch() {
         let mut barrier = barrier();
         let now = Instant::now();
         barrier.on_select(tag("en"), now);
 
-        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("ru")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_down(), Some(tag("ru")), now);
         assert_eq!(verdict, Verdict::Swallow);
-        assert_eq!(select, Some(tag("ru")));
+        assert_eq!(request, Request::Select(tag("ru")));
 
-        let Decision { verdict, select: _ } =
-            barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
+        let Decision {
+            verdict,
+            request: _,
+        } = barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
         assert_eq!(verdict, Verdict::Hold);
         assert_eq!(barrier.held(), 1);
     }
@@ -725,15 +838,18 @@ mod tests {
 
         assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Nothing);
 
-        let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now);
-        assert_eq!(select, Some(tag("en")));
+        let Decision {
+            verdict: _,
+            request,
+        } = barrier.on_key(switch_down(), None, now);
+        assert_eq!(request, Request::Select(tag("en")));
     }
 
     #[test]
     fn an_activation_select_during_a_key_driven_switch_is_refused() {
         let mut barrier = barrier();
         let now = Instant::now();
-        barrier.on_key(signal_down(), Some(tag("en")), now);
+        barrier.on_key(switch_down(), Some(tag("en")), now);
         barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
 
         assert!(!barrier.on_select(tag("en"), now));
@@ -753,12 +869,15 @@ mod tests {
             Elapsed::Waiting(Duration::from_millis(30))
         );
 
-        let Decision { verdict: _, select } = barrier.on_key(
-            signal_down(),
+        let Decision {
+            verdict: _,
+            request,
+        } = barrier.on_key(
+            switch_down(),
             Some(tag("en")),
             now + Duration::from_millis(60),
         );
-        assert_eq!(select, Some(tag("en")));
+        assert_eq!(request, Request::Select(tag("en")));
     }
 
     #[test]
@@ -769,8 +888,11 @@ mod tests {
 
         assert_eq!(barrier.tick(now + HOLD), Elapsed::Nothing);
 
-        let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now + HOLD);
-        assert_eq!(select, Some(tag("en")));
+        let Decision {
+            verdict: _,
+            request,
+        } = barrier.on_key(switch_down(), None, now + HOLD);
+        assert_eq!(request, Request::Select(tag("en")));
     }
 
     #[test]
@@ -781,8 +903,11 @@ mod tests {
 
         assert!(!barrier.select_failed());
 
-        let Decision { verdict: _, select } = barrier.on_key(signal_down(), None, now);
-        assert_eq!(select, Some(tag("en")));
+        let Decision {
+            verdict: _,
+            request,
+        } = barrier.on_key(switch_down(), None, now);
+        assert_eq!(request, Request::Select(tag("en")));
     }
 
     #[test]
@@ -790,11 +915,204 @@ mod tests {
         let mut barrier = Barrier::new(Vec::new(), HOLD);
         let now = Instant::now();
 
-        let Decision { verdict, select } = barrier.on_key(signal_down(), Some(tag("en")), now);
+        let Decision { verdict, request } = barrier.on_key(switch_down(), Some(tag("en")), now);
         assert_eq!(verdict, Verdict::Swallow);
-        assert_eq!(select, None);
+        assert_eq!(request, Request::Nothing);
 
-        let Decision { verdict, select: _ } = barrier.on_key(key(EventKind::Down, 0), None, now);
+        let Decision {
+            verdict,
+            request: _,
+        } = barrier.on_key(key(EventKind::Down, 0), None, now);
         assert_eq!(verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn the_retype_key_in_idle_is_swallowed_and_asks_for_a_retype() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+
+        let Decision { verdict, request } = barrier.on_key(retype_down(), Some(tag("en")), now);
+
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(request, Request::Retype);
+        assert_eq!(barrier.held(), 0);
+    }
+
+    #[test]
+    fn the_retype_key_during_an_activation_select_asks_for_a_retype() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_select(tag("ru"), now);
+
+        let Decision { verdict, request } = barrier.on_key(retype_down(), Some(tag("ru")), now);
+
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(request, Request::Retype);
+    }
+
+    #[test]
+    fn a_held_retype_key_repeating_and_coming_up_ask_for_nothing() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+
+        let Decision { verdict, request } = barrier.on_key(retype_repeat(), Some(tag("en")), now);
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(
+            request,
+            Request::Nothing,
+            "a key held for a moment would otherwise retype on every autorepeat"
+        );
+
+        let Decision { verdict, request } = barrier.on_key(retype_up(), Some(tag("en")), now);
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(request, Request::Nothing);
+        assert_eq!(barrier.held(), 0);
+    }
+
+    #[test]
+    fn the_retype_key_during_a_switch_is_swallowed_and_changes_nothing() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(switch_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+
+        let Decision { verdict, request } = barrier.on_key(retype_down(), Some(tag("en")), now);
+
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(request, Request::Nothing);
+        assert_eq!(barrier.held(), 1);
+        assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Settling);
+    }
+
+    #[test]
+    fn the_retype_key_during_the_settle_is_swallowed_and_changes_nothing() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(switch_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        barrier.confirmed(Some(tag("ru")), now);
+
+        let Decision { verdict, request } = barrier.on_key(retype_down(), Some(tag("ru")), now);
+
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(request, Request::Nothing);
+        assert_eq!(barrier.held(), 1);
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
+    }
+
+    #[test]
+    fn a_retype_switches_with_its_queue_already_full_and_the_settle_replays_it() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+
+        assert!(barrier.on_retype(tag("en"), 3, now));
+        assert_eq!(barrier.held(), 3);
+
+        let Decision { verdict, request } =
+            barrier.on_key(key(EventKind::Down, 0), Some(tag("ru")), now);
+        assert_eq!(verdict, Verdict::Hold);
+        assert_eq!(request, Request::Nothing);
+        assert_eq!(barrier.held(), 4);
+
+        assert_eq!(barrier.confirmed(Some(tag("en")), now), Confirmed::Settling);
+        assert_eq!(barrier.held(), 4);
+
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
+        assert_eq!(barrier.held(), 0);
+    }
+
+    #[test]
+    fn a_retype_during_an_activation_select_takes_the_window_over() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_select(tag("ru"), now);
+
+        assert!(barrier.on_retype(tag("en"), 2, now));
+        assert_eq!(barrier.held(), 2);
+        assert_eq!(barrier.confirmed(Some(tag("en")), now), Confirmed::Settling);
+    }
+
+    #[test]
+    fn a_retype_during_a_switch_is_refused_and_leaves_the_switch_alone() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(switch_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+
+        assert!(!barrier.on_retype(tag("en"), 7, now));
+        assert_eq!(barrier.held(), 1);
+        assert_eq!(barrier.confirmed(Some(tag("ru")), now), Confirmed::Settling);
+    }
+
+    #[test]
+    fn a_retype_during_the_settle_is_refused_and_leaves_the_settle_alone() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_key(switch_down(), Some(tag("en")), now);
+        barrier.on_key(key(EventKind::Down, 0), Some(tag("en")), now);
+        barrier.confirmed(Some(tag("ru")), now);
+
+        assert!(!barrier.on_retype(tag("en"), 7, now));
+        assert_eq!(barrier.held(), 1);
+        assert_eq!(barrier.tick(now + SETTLE), Elapsed::Settled);
+    }
+
+    #[test]
+    fn a_retype_that_is_never_confirmed_releases_what_it_queued() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_retype(tag("en"), 2, now);
+
+        assert_eq!(
+            barrier.tick(now + Duration::from_millis(49)),
+            Elapsed::Waiting(Duration::from_millis(1))
+        );
+        assert_eq!(barrier.held(), 2);
+
+        assert_eq!(barrier.tick(now + HOLD), Elapsed::Unconfirmed);
+        assert_eq!(barrier.held(), 0);
+    }
+
+    #[test]
+    fn a_retype_whose_select_failed_replays_at_once() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+        barrier.on_retype(tag("en"), 2, now);
+
+        assert!(barrier.select_failed());
+        assert_eq!(barrier.held(), 0);
+    }
+
+    #[test]
+    fn a_mouse_down_passes_in_every_state_and_is_never_held() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+
+        let Decision { verdict, request } = barrier.on_key(mouse_down(), Some(tag("en")), now);
+        assert_eq!(verdict, Verdict::Pass);
+        assert_eq!(request, Request::Nothing);
+
+        barrier.on_select(tag("ru"), now);
+        let Decision {
+            verdict,
+            request: _,
+        } = barrier.on_key(mouse_down(), Some(tag("en")), now);
+        assert_eq!(verdict, Verdict::Pass);
+
+        barrier.on_key(switch_down(), Some(tag("en")), now);
+        let Decision {
+            verdict,
+            request: _,
+        } = barrier.on_key(mouse_down(), Some(tag("en")), now);
+        assert_eq!(verdict, Verdict::Pass);
+        assert_eq!(barrier.held(), 0);
+
+        barrier.confirmed(Some(tag("ru")), now);
+        let Decision {
+            verdict,
+            request: _,
+        } = barrier.on_key(mouse_down(), Some(tag("ru")), now);
+        assert_eq!(verdict, Verdict::Pass);
+        assert_eq!(barrier.held(), 0);
     }
 }

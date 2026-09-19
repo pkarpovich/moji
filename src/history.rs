@@ -4,7 +4,7 @@
 //! as plain data plus the tag they were typed in, and carries whatever the tap layer needs to
 //! replay them as an opaque payload. That split is what makes the flip testable without a tap.
 
-use crate::barrier::{EventKind, KeyEvent, RETYPE_KEYCODE, SIGNAL_KEYCODE};
+use crate::barrier::{EventKind, KeyEvent, RETYPE_KEYCODE, SWITCH_KEYCODE};
 use crate::cycle::next;
 use crate::macos::tis::LayoutTag;
 
@@ -80,7 +80,7 @@ pub fn action(event: KeyEvent) -> Action {
     if keycode == SPACE {
         return Action::Record(Kind::Space);
     }
-    if keycode == SIGNAL_KEYCODE || keycode == RETYPE_KEYCODE {
+    if keycode == SWITCH_KEYCODE || keycode == RETYPE_KEYCODE {
         return Action::Ignore;
     }
     Action::Record(Kind::Letter)
@@ -451,7 +451,7 @@ mod tests {
     fn the_signal_keys_and_everything_that_is_not_a_key_down_leave_the_history_alone() {
         assert_eq!(action(key(EventKind::Up, 0)), Action::Ignore);
         assert_eq!(action(key(EventKind::Flags, 56)), Action::Ignore);
-        assert_eq!(action(key(EventKind::Down, SIGNAL_KEYCODE)), Action::Ignore);
+        assert_eq!(action(key(EventKind::Down, SWITCH_KEYCODE)), Action::Ignore);
         assert_eq!(action(key(EventKind::Down, RETYPE_KEYCODE)), Action::Ignore);
     }
 

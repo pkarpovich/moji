@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use objc2_core_foundation::CFRunLoop;
 
 use crate::barrier::{
-    Barrier, Confirmed, Decision, Elapsed, KeyEvent, SETTLE, SIGNAL_KEYCODE, Verdict,
+    Barrier, Confirmed, Decision, Elapsed, KeyEvent, Request, SETTLE, SWITCH_KEYCODE, Verdict,
 };
 use crate::executable::{self, Executable};
 use crate::macos::focus;
@@ -256,15 +256,18 @@ impl State {
             };
             barrier.on_key(event, current, now)
         };
-        let Decision { verdict, select } = decision;
+        let Decision { verdict, request } = decision;
 
-        let Some(tag) = select else {
-            return verdict;
-        };
-        tracing::debug!(%tag, "the signal key asks for a switch");
-        self.switched_at.set(Some(now));
-        self.arm(self.hold);
-        self.select(&tag);
+        match request {
+            Request::Nothing => {}
+            Request::Retype => {}
+            Request::Select(tag) => {
+                tracing::debug!(%tag, "the switch key asks for a switch");
+                self.switched_at.set(Some(now));
+                self.arm(self.hold);
+                self.select(&tag);
+            }
+        }
         verdict
     }
 
@@ -461,7 +464,7 @@ impl State {
     }
 
     fn current_for(&self, keycode: u16) -> Option<LayoutTag> {
-        if keycode != SIGNAL_KEYCODE {
+        if keycode != SWITCH_KEYCODE {
             return None;
         }
         self.current_tag()

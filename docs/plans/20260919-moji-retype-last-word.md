@@ -189,11 +189,11 @@ impl<T> History<T> {
 **Files:**
 - Modify: `src/barrier.rs`, `src/daemon.rs`, `tests/live.rs`
 
-- [ ] rename `SIGNAL_KEYCODE` to `SWITCH_KEYCODE` everywhere and add `RETYPE_KEYCODE = 79`
-- [ ] write failing tests: a retype press in `Idle` and in `Selecting` is swallowed with `Request::Retype`; its repeat and release are swallowed with `Request::Nothing`; a press during `Switching` and during `Settling` is swallowed with `Request::Nothing` and switches nothing; `on_retype` from `Idle` enters `Switching` reporting the given held count, then `confirmed` with the target answers `Settling` and `tick` after `SETTLE` answers `Settled`; `on_retype` during `Switching` and `Settling` returns false and leaves the state alone; `tick` past the hold after `on_retype` answers `Unconfirmed`; a `MouseDown` passes in every state and is never counted as held
-- [ ] replace `Decision.select` with `Decision.request: Request` and update the existing tests and `src/daemon.rs`
-- [ ] implement `Signal::Retype`, `Signal::Mouse`, `EventKind::MouseDown` and `on_retype`
-- [ ] run `mise run check` - must pass before task 4
+- [x] rename `SIGNAL_KEYCODE` to `SWITCH_KEYCODE` everywhere and add `RETYPE_KEYCODE = 79`
+- [x] write failing tests: a retype press in `Idle` and in `Selecting` is swallowed with `Request::Retype`; its repeat and release are swallowed with `Request::Nothing`; a press during `Switching` and during `Settling` is swallowed with `Request::Nothing` and switches nothing; `on_retype` from `Idle` enters `Switching` reporting the given held count, then `confirmed` with the target answers `Settling` and `tick` after `SETTLE` answers `Settled`; `on_retype` during `Switching` and `Settling` returns false and leaves the state alone; `tick` past the hold after `on_retype` answers `Unconfirmed`; a `MouseDown` passes in every state and is never counted as held
+- [x] replace `Decision.select` with `Decision.request: Request` and update the existing tests and `src/daemon.rs`
+- [x] implement `Signal::Retype`, `Signal::Mouse`, `EventKind::MouseDown` and `on_retype`
+- [x] run `mise run check` - must pass before task 4
 
 ### Task 4: Mouse-down in the tap, capturable held events, synthesized backspaces
 

@@ -14,7 +14,7 @@ use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use moji::barrier::SIGNAL_KEYCODE;
+use moji::barrier::SWITCH_KEYCODE;
 use moji::daemon::{Daemon, Releases};
 use moji::macos::harness::{self, KEYCODE_A, Stroke, Window};
 use moji::macos::tis::{self, Layout, LayoutTag};
@@ -245,8 +245,8 @@ fn start_daemon_pinning(
 }
 
 fn post_switch_and_burst() {
-    harness::post_key(SIGNAL_KEYCODE, Stroke::Down);
-    harness::post_key(SIGNAL_KEYCODE, Stroke::Up);
+    harness::post_key(SWITCH_KEYCODE, Stroke::Down);
+    harness::post_key(SWITCH_KEYCODE, Stroke::Up);
     for _ in 0..BURST {
         harness::post_key(KEYCODE_A, Stroke::Down);
         harness::post_key(KEYCODE_A, Stroke::Up);
