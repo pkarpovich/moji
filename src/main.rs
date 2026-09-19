@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use argh::FromArgs;
-use moji::barrier;
 use moji::config::{self, Config};
+use moji::cycle;
 use moji::daemon::{self, Daemon};
 use moji::macos::focus;
 use moji::macos::tap;
@@ -236,7 +236,7 @@ fn toggle() -> ExitCode {
     } = &config;
 
     let current = current_tag(&resolved);
-    let Some(next) = barrier::next(cycle, current.as_ref()) else {
+    let Some(next) = cycle::next(cycle, current.as_ref()) else {
         tracing::error!("the configured cycle is empty, so there is nothing to toggle to");
         return ExitCode::FAILURE;
     };

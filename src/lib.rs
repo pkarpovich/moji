@@ -6,6 +6,7 @@
 
 pub mod barrier;
 pub mod config;
+pub mod cycle;
 pub mod daemon;
 pub mod executable;
 pub mod macos;

@@ -162,10 +162,10 @@ impl<T> History<T> {
 - Create: `src/cycle.rs`
 - Modify: `src/lib.rs`, `src/barrier.rs`, `src/main.rs`
 
-- [ ] create `src/cycle.rs` with `pub fn next` moved verbatim from `src/barrier.rs`, declare it in `src/lib.rs`
-- [ ] point `src/barrier.rs` and `src/main.rs` at `crate::cycle::next`
-- [ ] move the existing `next` tests into `src/cycle.rs`
-- [ ] run `mise run check` - must pass before task 2
+- [x] create `src/cycle.rs` with `pub fn next` moved verbatim from `src/barrier.rs`, declare it in `src/lib.rs`
+- [x] point `src/barrier.rs` and `src/main.rs` at `crate::cycle::next`
+- [x] move the existing `next` tests into `src/cycle.rs`
+- [x] run `mise run check` - must pass before task 2
 
 ### Task 2: History of typed keys as a pure module
 
