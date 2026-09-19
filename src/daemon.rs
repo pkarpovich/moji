@@ -238,6 +238,7 @@ impl State {
             keycode,
             flags: _,
             timestamp: _,
+            stroke: _,
         } = event;
         let current = self.current_for(keycode);
 

@@ -21,7 +21,7 @@ use objc2_core_graphics::{
     CGRequestListenEventAccess, CGRequestPostEventAccess,
 };
 
-use crate::barrier::{EventKind, KeyEvent, Verdict};
+use crate::barrier::{EventKind, KeyEvent, Stroke, Verdict};
 
 const KEYBOARD_MASK: CGEventMask = (1 << CGEventType::KeyDown.0)
     | (1 << CGEventType::KeyUp.0)
@@ -256,11 +256,18 @@ pub fn is_replayed(user_data: i64) -> bool {
 pub fn key_event(event: &CGEvent) -> Option<KeyEvent> {
     let kind = kind_of(CGEvent::r#type(Some(event)))?;
     let keycode = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+    let autorepeat =
+        CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventAutorepeat);
+    let stroke = match autorepeat {
+        0 => Stroke::First,
+        _ => Stroke::Repeat,
+    };
     Some(KeyEvent {
         kind,
         keycode: keycode as u16,
         flags: CGEvent::flags(Some(event)).bits(),
         timestamp: CGEvent::timestamp(Some(event)),
+        stroke,
     })
 }
 
@@ -386,6 +393,7 @@ mod tests {
             keycode,
             flags: _,
             timestamp: _,
+            stroke: _,
         }) = key_event(&event)
         else {
             panic!("a keyDown event is not a key event");
@@ -393,6 +401,26 @@ mod tests {
 
         assert_eq!(kind, EventKind::Down);
         assert_eq!(keycode, KEYCODE_A);
+    }
+
+    #[test]
+    fn a_repeated_key_down_reads_as_a_repeat_stroke() {
+        let event = keyboard_event(KEYCODE_A, true);
+        CGEvent::set_integer_value_field(Some(&event), CGEventField::KeyboardEventAutorepeat, 1);
+
+        let Some(KeyEvent {
+            kind,
+            keycode: _,
+            flags: _,
+            timestamp: _,
+            stroke,
+        }) = key_event(&event)
+        else {
+            panic!("a repeated keyDown event is not a key event");
+        };
+
+        assert_eq!(kind, EventKind::Down);
+        assert_eq!(stroke, Stroke::Repeat);
     }
 
     #[test]
@@ -404,6 +432,7 @@ mod tests {
             keycode,
             flags: _,
             timestamp: _,
+            stroke: _,
         }) = key_event(&event)
         else {
             panic!("a keyUp event is not a key event");
@@ -423,6 +452,7 @@ mod tests {
             keycode,
             flags: _,
             timestamp: _,
+            stroke: _,
         }) = key_event(&event)
         else {
             panic!("a flagsChanged event is not a key event");

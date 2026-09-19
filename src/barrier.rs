@@ -32,6 +32,15 @@ pub enum EventKind {
     Flags,
 }
 
+/// Whether a key-down is the press itself or the system repeating a held key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stroke {
+    /// The key went down under a finger.
+    First,
+    /// The system repeated a key that is still held.
+    Repeat,
+}
+
 /// The plain-data view of a keyboard event that the barrier reasons about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyEvent {
@@ -43,6 +52,8 @@ pub struct KeyEvent {
     pub flags: u64,
     /// The event's own timestamp, as the tap reported it.
     pub timestamp: u64,
+    /// Whether a key-down is the press or an autorepeat of it.
+    pub stroke: Stroke,
 }
 
 /// What the tap must do with the event it just handed over.
@@ -112,6 +123,7 @@ pub enum Elapsed {
 
 enum Signal {
     Press,
+    Repeat,
     Release,
     Other,
 }
@@ -176,6 +188,7 @@ impl Barrier {
     ) -> Decision {
         match classify(event) {
             Signal::Press => self.start_switch(current, now),
+            Signal::Repeat => Decision::swallow(),
             Signal::Release => Decision::swallow(),
             Signal::Other => self.hold_or_pass(),
         }
@@ -399,12 +412,16 @@ fn classify(event: KeyEvent) -> Signal {
         keycode,
         flags: _,
         timestamp: _,
+        stroke,
     } = event;
     if keycode != SIGNAL_KEYCODE {
         return Signal::Other;
     }
     match kind {
-        EventKind::Down => Signal::Press,
+        EventKind::Down => match stroke {
+            Stroke::First => Signal::Press,
+            Stroke::Repeat => Signal::Repeat,
+        },
         EventKind::Up => Signal::Release,
         EventKind::Flags => Signal::Other,
     }
@@ -430,6 +447,14 @@ mod tests {
             keycode,
             flags: 0,
             timestamp: 0,
+            stroke: Stroke::First,
+        }
+    }
+
+    fn signal_repeat() -> KeyEvent {
+        KeyEvent {
+            stroke: Stroke::Repeat,
+            ..signal_down()
         }
     }
 
@@ -439,6 +464,21 @@ mod tests {
 
     fn signal_up() -> KeyEvent {
         key(EventKind::Up, SIGNAL_KEYCODE)
+    }
+
+    #[test]
+    fn a_held_signal_key_repeating_is_swallowed_and_switches_nothing() {
+        let mut barrier = barrier();
+        let now = Instant::now();
+
+        let Decision { verdict, select } = barrier.on_key(signal_repeat(), Some(tag("en")), now);
+
+        assert_eq!(verdict, Verdict::Swallow);
+        assert_eq!(
+            select, None,
+            "a globe held for a moment would otherwise toggle the layout on every autorepeat"
+        );
+        assert_eq!(barrier.held(), 0);
     }
 
     #[test]
