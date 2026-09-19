@@ -2,11 +2,11 @@
 
 moji (文字) is a macOS LaunchAgent that becomes the only thing on the machine that switches keyboard layouts.
 
-Switching a layout and typing the next letter normally travel on two unrelated paths, and nothing orders them, so letters typed right after a fast switch land in the old layout. moji fixes the ordering: Karabiner emits one signal key, F19, moji swallows it, selects the next layout, and holds every following keystroke until the change is confirmed - then replays them in order. The confirmation is a notification moji observes in its own process, and every other process learns of the switch a few milliseconds later, so the replay waits 10 ms past the confirmation. A watchdog releases the keystrokes after 50 ms regardless, so the keyboard can never hang.
+Switching a layout and typing the next letter normally travel on two unrelated paths, and nothing orders them, so letters typed right after a fast switch land in the old layout. moji fixes the ordering: Karabiner emits a signal key, F19, moji swallows it, selects the next layout, and holds every following keystroke until the change is confirmed - then replays them in order. The confirmation is a notification moji observes in its own process, and every other process learns of the switch a few milliseconds later, so the replay waits 10 ms past the confirmation. A watchdog releases the keystrokes after 50 ms regardless, so the keyboard can never hang.
 
-It also pins a layout per application and remembers the layout every other application last used.
+It also pins a layout per application and remembers the layout every other application last used. A second signal key, F18, retypes the last word - or the whole tail - in the other layout, from the keystrokes moji already saw.
 
-The full design, and the reasoning behind every decision, is in `docs/plans/completed/20260918-moji-layout-daemon.md`; the coding conventions are in `CLAUDE.md`.
+The full design, and the reasoning behind every decision, is in `docs/plans/completed/20260918-moji-layout-daemon.md`, and the retype key's is in `docs/plans/completed/20260919-moji-retype-last-word.md`; the coding conventions are in `CLAUDE.md`.
 
 ## Install
 
@@ -32,21 +32,21 @@ ru = "Russian - Universal"
 ```
 
 - `[layouts]` maps a short tag to the **localized name** of an enabled keyboard layout, the one `moji list` prints in its first column. Names are matched, never input source IDs: the same layout reports two different IDs depending on which process asks.
-- `cycle` is the order the switch key and `moji toggle` walk, wrapping at the end. A layout outside the cycle, or one no tag names at all, goes to the first entry. The cycle needs at least two entries, and no tag may stand in it twice: selecting the layout that is already selected is confirmed by no notification, so the barrier would wait for the watchdog on every tap.
+- `cycle` is the order the switch key, the retype key and `moji toggle` walk, wrapping at the end. A layout outside the cycle, or one no tag names at all, goes to the first entry. The cycle needs at least two entries, and no tag may stand in it twice: selecting the layout that is already selected is confirmed by no notification, so the barrier would wait for the watchdog on every tap.
 - `[apps]` pins a layout to a bundle id. Every application not listed gets the layout it last used, which moji records when the application loses focus and whenever the layout changes. An application whose decided layout is already the selected one is left alone, for the same no-notification reason. Which application the keyboard goes to is asked of Accessibility every 50 ms rather than of the workspace: a launcher such as Tuna shows its panel without activating, so the workspace keeps naming the window behind it while the panel takes the keys, and Accessibility's focused application follows the keys. `moji status` prints that bundle id, which is how to find the one to pin.
 - An unknown field, a tag `[layouts]` does not carry, or a name no enabled layout answers to is an error that names the file, the field and what was expected. `moji --check-config` parses, resolves every tag against the enabled layouts, prints what it made of the file, and exits.
 
 ## Retyping the last word
 
-The second signal key, **F18**, retypes what was just typed in the other layout. moji keeps the keystrokes it saw - up to 512 of them - and a press posts that many backspaces, selects the next layout in the cycle, and replays the very events it captured. A replayed keystroke types the letter of the layout selected after it was captured, because the receiving application translates the keycode itself, so moji never learns which letter a keycode makes and never touches the text field.
+The second signal key, **F18**, retypes what was just typed in the other layout. moji keeps the keystrokes it saw - up to 512 of them - and a press selects the next layout in the cycle, posts one backspace per covered keystroke, and replays the very events it captured. A replayed keystroke types the letter of the layout selected after it was captured, because the receiving application translates the keycode itself, so moji never learns which letter a keycode makes and never touches the text field.
 
 - The first press covers the **last word**: the letters back to the space before them, plus the spaces that follow.
 - The next press, with nothing typed in between, covers the **whole tail**: everything typed since the layout last changed under the fingers. Typing again makes the press after it a word again, and a third press flips the same tail once more, which with a two-layout cycle puts it back.
 - The layout to retype in is the one after the layout the covered keystrokes were typed in, so a word typed before a manual switch is retyped without switching again.
 
-What moji did not see, it cannot flip. The history holds only keystrokes that passed the tap since it started, so text typed before moji ran, pasted text, and text selected with the mouse are out of reach. These forget the history outright: a click, Return, Tab, Escape, an arrow or any other caret key, a chord carrying Command or Control, the keyboard moving to another application, and a keystroke typed in a layout no tag in the configuration names. Delete drops the last keystroke, as it did downstream.
+What moji did not see, it cannot flip. The history holds only keystrokes that passed the tap since it started, so text typed before moji ran, pasted text, and text selected with the mouse are out of reach. These forget the history outright: a click, Return, Tab, Escape, an arrow or any other caret key, a key that types no letter at all such as a function key, a chord carrying Command, Control or Option, the keyboard moving to another application, and a keystroke typed in a layout no tag in the configuration names. Delete drops the last keystroke, as it did downstream.
 
-A press with nothing in reach does nothing, and so does one while a switch is still running. When the layout cannot be selected, nothing is deleted and nothing is replayed: the text stays as it was typed.
+A press with nothing in reach does nothing, and so does one while a switch is still running or one carrying a modifier. When the layout cannot be selected, nothing is deleted and nothing is replayed: the text stays as it was typed.
 
 ## The contract with Karabiner
 
@@ -68,7 +68,7 @@ Two TCC grants, both to the application bundle rather than to a path that change
 ## Commands
 
 ```
-moji run          own the switch key and the layout for as long as the process lives
+moji run          own the signal keys and the layout for as long as the process lives
 moji set <tag>    select the layout a tag names
 moji toggle       select the layout after the current one in the cycle
 moji status       print the current layout, its id, language, tag, and the application the keyboard goes to
@@ -86,7 +86,7 @@ Everything but `run` is one-shot and talks to Text Input Sources directly: there
 
 ## Logging
 
-`moji run` logs at `info` by default, and a switch that confirmed in time logs nothing: silence is the normal path. Two things are always reported: the watchdog releasing held keys because no confirmation arrived within 50 ms (a `warn` naming how many keys it let go and how many times that happened since start), and a layout that could not be selected. `MOJI_LOG=debug` adds one line per step of every switch: what asked for it (the signal key or the application the keyboard moved to), when the confirmation arrived and how many keys were waiting, and when they went through. `MOJI_LOG` takes any `tracing` filter, so `MOJI_LOG=moji::daemon=debug` narrows it to the daemon.
+`moji run` logs at `info` by default, and a switch that confirmed in time logs nothing: silence is the normal path. Three things are always reported: the watchdog releasing held keys because no confirmation arrived within 50 ms (a `warn` naming how many keys it let go and how many times that happened since start), a layout that could not be selected, and a keystroke the retype could not capture or copy - the history is dropped rather than half-flipped. `MOJI_LOG=debug` adds one line per step of every switch: what asked for it (the switch key, the retype key or the application the keyboard moved to), when the confirmation arrived and how many keys were waiting, and when they went through, plus why a retype did nothing when it did nothing. `MOJI_LOG` takes any `tracing` filter, so `MOJI_LOG=moji::daemon=debug` narrows it to the daemon.
 
 `moji install` writes `~/Library/LaunchAgents/dev.pkarpovich.moji.plist` naming the running binary with its symlinks resolved, and captures the daemon's output in `~/Library/Logs/moji/moji.log` and `moji.err.log` - that is where an installed daemon's log lines go, since launchd gives it no terminal. `moji uninstall` unloads the agent and removes the plist; the logs stay.
 

@@ -366,7 +366,7 @@ impl State {
                     %target,
                     "the retype replays the keystrokes in the layout that is already selected"
                 );
-                self.release();
+                self.held.replay();
             }
             Switch::Needed => {
                 let waiting = self.held.len();

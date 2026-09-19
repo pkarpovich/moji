@@ -25,6 +25,16 @@ pub const RETYPE_KEYCODE: u16 = 79;
 /// not learned of it yet.
 pub const SETTLE: Duration = Duration::from_millis(10);
 
+const COMMAND: u64 = 1 << 20;
+const CONTROL: u64 = 1 << 18;
+const ALTERNATE: u64 = 1 << 19;
+
+/// The modifier flags that make a key-down a chord rather than a keystroke that types a letter.
+///
+/// A chord is the application's, not the text's: the history never records one, and the retype key
+/// carrying one is refused rather than flipping text the chord may have moved out of reach.
+pub const CHORD: u64 = COMMAND | CONTROL | ALTERNATE;
+
 /// Which kind of keyboard event the tap saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
@@ -216,7 +226,7 @@ impl Barrier {
                 Phase::Release => Decision::swallow(),
             },
             Signal::Retype(phase) => match phase {
-                Phase::Press => self.ask_retype(),
+                Phase::Press => self.ask_retype(event.flags),
                 Phase::Repeat => Decision::swallow(),
                 Phase::Release => Decision::swallow(),
             },
@@ -230,21 +240,8 @@ impl Barrier {
     /// A key-driven switch owns its window, so this is refused while one is running and while its
     /// held events are settling.
     pub fn on_select(&mut self, expected: LayoutTag, now: Instant) -> bool {
-        match &self.state {
-            State::Idle => {}
-            State::Switching {
-                expected: _,
-                deadline: _,
-                held: _,
-            } => return false,
-            State::Selecting {
-                expected: _,
-                deadline: _,
-            } => {}
-            State::Settling {
-                deadline: _,
-                held: _,
-            } => return false,
+        if !self.window_is_free() {
+            return false;
         }
         self.state = State::Selecting {
             expected,
@@ -260,21 +257,8 @@ impl Barrier {
     /// running owns its window, so this is refused while one is running and while its held events
     /// are settling.
     pub fn on_retype(&mut self, target: LayoutTag, held: usize, now: Instant) -> bool {
-        match &self.state {
-            State::Idle => {}
-            State::Switching {
-                expected: _,
-                deadline: _,
-                held: _,
-            } => return false,
-            State::Selecting {
-                expected: _,
-                deadline: _,
-            } => {}
-            State::Settling {
-                deadline: _,
-                held: _,
-            } => return false,
+        if !self.window_is_free() {
+            return false;
         }
         self.state = State::Switching {
             expected: target,
@@ -389,6 +373,25 @@ impl Barrier {
         }
     }
 
+    fn window_is_free(&self) -> bool {
+        match &self.state {
+            State::Idle => true,
+            State::Switching {
+                expected: _,
+                deadline: _,
+                held: _,
+            } => false,
+            State::Selecting {
+                expected: _,
+                deadline: _,
+            } => true,
+            State::Settling {
+                deadline: _,
+                held: _,
+            } => false,
+        }
+    }
+
     fn start_switch(&mut self, current: Option<LayoutTag>, now: Instant) -> Decision {
         let from = match &self.state {
             State::Idle => current,
@@ -420,7 +423,14 @@ impl Barrier {
         }
     }
 
-    fn ask_retype(&mut self) -> Decision {
+    fn ask_retype(&mut self, flags: u64) -> Decision {
+        if flags & CHORD != 0 {
+            tracing::debug!(
+                flags,
+                "the retype key carries a chord, so the retype is refused"
+            );
+            return Decision::swallow();
+        }
         match &self.state {
             State::Idle => {}
             State::Switching {
@@ -948,6 +958,24 @@ mod tests {
 
         assert_eq!(verdict, Verdict::Swallow);
         assert_eq!(request, Request::Retype);
+    }
+
+    #[test]
+    fn the_retype_key_carrying_a_chord_is_swallowed_and_asks_for_nothing() {
+        let now = Instant::now();
+
+        for flags in [1 << 20, 1 << 18, 1 << 19] {
+            let mut barrier = barrier();
+            let chorded = KeyEvent {
+                flags,
+                ..retype_down()
+            };
+
+            let Decision { verdict, request } = barrier.on_key(chorded, Some(tag("en")), now);
+
+            assert_eq!(verdict, Verdict::Swallow, "flags {flags}");
+            assert_eq!(request, Request::Nothing, "flags {flags}");
+        }
     }
 
     #[test]

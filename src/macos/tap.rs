@@ -91,8 +91,7 @@ impl HeldEvent {
     /// Returns another retained copy of this event, or nothing when the copy fails.
     pub fn duplicate(&self) -> Option<HeldEvent> {
         let HeldEvent(event) = self;
-        let event = CGEvent::new_copy(Some(event))?;
-        Some(HeldEvent(event))
+        HeldEvent::capture(event)
     }
 }
 

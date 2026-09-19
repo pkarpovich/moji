@@ -4,18 +4,19 @@
 //! as plain data plus the tag they were typed in, and carries whatever the tap layer needs to
 //! replay them as an opaque payload. That split is what makes the flip testable without a tap.
 
-use crate::barrier::{EventKind, KeyEvent, RETYPE_KEYCODE, SWITCH_KEYCODE};
+use crate::barrier::{CHORD, EventKind, KeyEvent, RETYPE_KEYCODE, SWITCH_KEYCODE};
 use crate::cycle::next;
 use crate::macos::tis::LayoutTag;
 
 /// How many keystrokes the history keeps before the oldest one is dropped.
 pub const CAP: usize = 512;
 
-const COMMAND: u64 = 1 << 20;
-const CONTROL: u64 = 1 << 18;
 const DELETE: u16 = 51;
 const SPACE: u16 = 49;
-const CLEARING: [u16; 13] = [36, 76, 48, 53, 115, 116, 119, 121, 117, 123, 124, 125, 126];
+const CLEARING: [u16; 33] = [
+    36, 76, 48, 53, 115, 116, 119, 121, 117, 123, 124, 125, 126, 122, 120, 99, 118, 96, 97, 98,
+    100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 90, 114, 71,
+];
 
 /// What a recorded keystroke contributes to a word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +51,8 @@ pub struct Flip {
 
 /// Returns what `event` asks the history to do.
 ///
-/// A key-down carrying Command or Control, and every key that moves the caret out of the history's
-/// reach, clears it; the two signal keys leave it alone.
+/// A key-down carrying a chord modifier, every key that moves the caret out of the history's
+/// reach, and every key that types no letter at all clear it; the two signal keys leave it alone.
 pub fn action(event: KeyEvent) -> Action {
     let KeyEvent {
         kind,
@@ -66,7 +67,7 @@ pub fn action(event: KeyEvent) -> Action {
         EventKind::MouseDown => return Action::Clear,
         EventKind::Down => {}
     }
-    if flags & (COMMAND | CONTROL) != 0 {
+    if flags & CHORD != 0 {
         return Action::Clear;
     }
     for clearing in CLEARING {
@@ -401,11 +402,66 @@ mod tests {
 
     #[test]
     fn keys_that_move_the_caret_out_of_reach_clear_the_history() {
-        for keycode in CLEARING {
+        let named: [(u16, &str); 13] = [
+            (36, "Return"),
+            (76, "keypad Enter"),
+            (48, "Tab"),
+            (53, "Escape"),
+            (115, "Home"),
+            (116, "Page Up"),
+            (119, "End"),
+            (121, "Page Down"),
+            (117, "forward delete"),
+            (123, "Left Arrow"),
+            (124, "Right Arrow"),
+            (125, "Down Arrow"),
+            (126, "Up Arrow"),
+        ];
+
+        for (keycode, name) in named {
             assert_eq!(
                 action(key(EventKind::Down, keycode)),
                 Action::Clear,
-                "keycode {keycode} must clear the history"
+                "{name} must clear the history"
+            );
+        }
+        assert_eq!(
+            action(key(EventKind::Down, 0)),
+            Action::Record(Kind::Letter),
+            "a letter must not clear the history"
+        );
+    }
+
+    #[test]
+    fn keys_that_type_no_letter_clear_the_history_rather_than_counting_as_one() {
+        let named: [(u16, &str); 20] = [
+            (122, "F1"),
+            (120, "F2"),
+            (99, "F3"),
+            (118, "F4"),
+            (96, "F5"),
+            (97, "F6"),
+            (98, "F7"),
+            (100, "F8"),
+            (101, "F9"),
+            (109, "F10"),
+            (103, "F11"),
+            (111, "F12"),
+            (105, "F13"),
+            (107, "F14"),
+            (113, "F15"),
+            (106, "F16"),
+            (64, "F17"),
+            (90, "F20"),
+            (114, "Help"),
+            (71, "keypad Clear"),
+        ];
+
+        for (keycode, name) in named {
+            assert_eq!(
+                action(key(EventKind::Down, keycode)),
+                Action::Clear,
+                "{name} types no letter, so it must clear the history"
             );
         }
     }
@@ -416,18 +472,26 @@ mod tests {
     }
 
     #[test]
-    fn a_command_or_control_chord_clears_the_history() {
-        let command = KeyEvent {
-            flags: COMMAND,
-            ..key(EventKind::Down, 0)
-        };
-        let control = KeyEvent {
-            flags: CONTROL,
-            ..key(EventKind::Down, 0)
-        };
+    fn a_chord_clears_the_history_whichever_modifier_it_carries() {
+        let named: [(u64, &str); 3] = [
+            (1 << 20, "Command"),
+            (1 << 18, "Control"),
+            (1 << 19, "Option"),
+        ];
 
-        assert_eq!(action(command), Action::Clear);
-        assert_eq!(action(control), Action::Clear);
+        for (flags, name) in named {
+            let chord = KeyEvent {
+                flags,
+                ..key(EventKind::Down, 0)
+            };
+            let chorded_delete = KeyEvent {
+                flags,
+                ..key(EventKind::Down, DELETE)
+            };
+
+            assert_eq!(action(chord), Action::Clear, "{name} and a letter");
+            assert_eq!(action(chorded_delete), Action::Clear, "{name} and Delete");
+        }
     }
 
     #[test]
@@ -509,6 +573,21 @@ mod tests {
             history.flip(&cycle()),
             Some(Flip {
                 count: 3,
+                target: tag("ru")
+            })
+        );
+    }
+
+    #[test]
+    fn a_delete_between_two_flips_makes_the_second_one_a_word_again() {
+        let mut history = typed("ab cd", "ru");
+        history.flip(&cycle());
+        history.erase();
+
+        assert_eq!(
+            history.flip(&cycle()),
+            Some(Flip {
+                count: 1,
                 target: tag("ru")
             })
         );

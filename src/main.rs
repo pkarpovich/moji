@@ -38,7 +38,7 @@ enum Command {
     Uninstall(Uninstall),
 }
 
-/// own the switch key and the layout for as long as this process lives
+/// own the signal keys and the layout for as long as this process lives
 #[derive(FromArgs, Debug, PartialEq, Eq)]
 #[argh(subcommand, name = "run")]
 struct Run {}
