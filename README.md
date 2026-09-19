@@ -8,6 +8,14 @@ It also pins a layout per application and remembers the layout every other appli
 
 The full design, and the reasoning behind every decision, is in `docs/plans/completed/20260918-moji-layout-daemon.md`; the coding conventions are in `CLAUDE.md`.
 
+## Install
+
+```
+brew install --cask pkarpovich/apps/moji
+```
+
+Write `~/.config/moji/config.toml` **before** installing the service, then `moji --check-config`, `moji install`, and grant Input Monitoring and Accessibility to Moji when it asks. Upgrades need nothing: the running daemon notices the new bundle and restarts itself under launchd.
+
 ## Configuration
 
 `$HOME/.config/moji/config.toml`, or wherever `MOJI_CONFIG` points. moji ships no default and writes none: `run`, `set` and `toggle` exit non-zero while the file is missing, and an installed agent without one is restarted by launchd until it exists. `status` and `list` answer without it.

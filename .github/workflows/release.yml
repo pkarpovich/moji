@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must never change: both TCC grants are keyed to this identifier plus the
+  # signing identity, so a new value loses them on the next upgrade.
+  BUNDLE_ID: dev.pkarpovich.moji
+  TARGET: aarch64-apple-darwin
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(mise exec -- cargo metadata --no-deps --format-version 1 |
+            python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$tag" != "$crate" ]; then
+            echo "tag $tag does not match Cargo.toml $crate" >&2
+            exit 1
+          fi
+
+      - run: mise run check
+
+      - run: mise exec -- cargo build --release --target "$TARGET"
+
+      - name: Info.plist is embedded
+        run: |
+          binary="target/$TARGET/release/moji"
+          plist=$(mktemp)
+          otool -P "$binary" | tail -n +3 > "$plist"
+          plutil -lint "$plist"
+          identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")
+          if [ "$identifier" != "$BUNDLE_ID" ]; then
+            echo "CFBundleIdentifier is $identifier, not $BUNDLE_ID" >&2
+            exit 1
+          fi
+
+      - uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      - name: Bundle and sign
+        env:
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: |
+          identity=$(security find-identity -v -p codesigning |
+            grep "Developer ID Application" | grep "($TEAM_ID)" |
+            head -n 1 | awk '{print $2}')
+          if [ -z "$identity" ]; then
+            echo "no Developer ID Application identity for team $TEAM_ID" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          ./scripts/bundle.sh "target/$TARGET/release/moji" dist "$identity"
+
+      - name: Notarize and staple
+        env:
+          KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          KEY_P8: ${{ secrets.ASC_KEY_CONTENT }}
+        run: |
+          key=$(mktemp)
+          printf '%s\n' "$KEY_P8" > "$key"
+          ditto -c -k --keepParent dist/Moji.app dist/notarize.zip
+          submission=$(xcrun notarytool submit dist/notarize.zip \
+            --key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" \
+            --wait --timeout 30m --output-format json)
+          echo "$submission"
+          id=$(echo "$submission" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          status=$(echo "$submission" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+          if [ "$status" != "Accepted" ]; then
+            xcrun notarytool log "$id" --key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" >&2
+            rm -f "$key"
+            exit 1
+          fi
+          rm -f "$key" dist/notarize.zip
+          xcrun stapler staple dist/Moji.app
+
+      - name: Gatekeeper accepts the bundle
+        run: |
+          verdict=$(spctl --assess --type exec --verbose=2 dist/Moji.app 2>&1)
+          echo "$verdict"
+          if ! echo "$verdict" | grep -q "Notarized Developer ID"; then
+            echo "the bundle is not notarized" >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ditto -c -k --keepParent dist/Moji.app "dist/Moji-arm64-$version.zip"
+          rm -rf dist/Moji.app
+          cd dist && shasum -a 256 *.zip > checksums.txt && cat checksums.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.zip
+            dist/checksums.txt
+          generate_release_notes: true
+
+  cask:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Read the version and the checksum
+        id: facts
+        run: |
+          {
+            version="${GITHUB_REF_NAME#v}"
+            echo "version=$version"
+            echo "sha=$(shasum -a 256 "dist/Moji-arm64-$version.zip" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: pkarpovich/homebrew-apps
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Write the cask
+        env:
+          VERSION: ${{ steps.facts.outputs.version }}
+          SHA: ${{ steps.facts.outputs.sha }}
+        run: |
+          mkdir -p tap/Casks
+          cat > tap/Casks/moji.rb <<EOF
+          cask "moji" do
+            version "${VERSION}"
+            sha256 "${SHA}"
+
+            url "https://github.com/pkarpovich/moji/releases/download/v#{version}/Moji-arm64-#{version}.zip"
+            name "moji"
+            desc "Keyboard layout switching daemon"
+            homepage "https://github.com/pkarpovich/moji"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
+            depends_on arch: :arm64
+            depends_on macos: :sonoma
+
+            app "Moji.app"
+            binary "#{appdir}/Moji.app/Contents/MacOS/moji"
+
+            # No uninstall stanza and no postflight: unloading the agent on every
+            # upgrade would leave it down, and postflight_steps cannot talk to
+            # launchd. \`moji install\` writes the agent once; on an upgrade the daemon
+            # notices its bundle was swapped and exits, and launchd starts the new one.
+
+            zap trash: [
+              "~/.config/moji",
+              "~/Library/LaunchAgents/dev.pkarpovich.moji.plist",
+              "~/Library/Logs/moji",
+            ]
+
+            caveats <<~CAVEATS
+              Write ~/.config/moji/config.toml BEFORE installing the service: the
+              daemon exits without one, which under a launchd agent is a restart
+              loop. \`moji list\` prints the enabled layouts to name; the minimum is:
+
+                cycle = ["en", "ru"]
+
+                [layouts]
+                en = "English - Universal"
+                ru = "Russian - Universal"
+
+              Then, once:
+
+                moji --check-config
+                moji install
+
+              That writes the launchd agent dev.pkarpovich.moji and starts it. The
+              first start asks for Input Monitoring, then for Accessibility; grant
+              both to Moji in System Settings > Privacy & Security. The daemon exits
+              until each grant lands and launchd starts it again, so nothing else
+              needs to be run. The grants survive upgrades: the app is identified by
+              its bundle id at a path that does not move.
+
+              moji switches on F19. Point Karabiner (or the keyboard itself) at
+              emitting F19 on the key that used to switch layouts, and remove every
+              select_input_source from Karabiner: moji is the only thing that
+              switches, and while it is not running F19 does nothing.
+
+              Logs are at ~/Library/Logs/moji/moji.log and moji.err.log.
+            CAVEATS
+          end
+          EOF
+
+      - name: Commit and push
+        working-directory: tap
+        env:
+          VERSION: ${{ steps.facts.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "moji ${VERSION}"
+          git push
