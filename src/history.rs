@@ -189,6 +189,27 @@ impl<T> History<T> {
     /// keystrokes take the target as their tag, so the press after a flip of the whole tail carries
     /// it back, while the run itself outlives every flip.
     pub fn flip(&mut self, cycle: &[LayoutTag]) -> Option<Flip> {
+        let Flip { count, target } = self.planned(cycle)?;
+        let start = self.entries.len() - count;
+
+        for Entry {
+            kind: _,
+            run: _,
+            tag,
+            payload: _,
+        } in &mut self.entries[start..]
+        {
+            *tag = target.clone();
+        }
+        self.last = Marker::Flipped;
+        Some(Flip { count, target })
+    }
+
+    /// Returns what the next [`History::flip`] would cover, without touching the history.
+    ///
+    /// The daemon asks for the target before it selects the layout, so a refused selection leaves
+    /// the history exactly as the user typed it.
+    pub fn planned(&self, cycle: &[LayoutTag]) -> Option<Flip> {
         if self.entries.is_empty() {
             return None;
         }
@@ -204,17 +225,6 @@ impl<T> History<T> {
             payload: _,
         } = &self.entries[start];
         let target = next(cycle, Some(tag))?;
-
-        for Entry {
-            kind: _,
-            run: _,
-            tag,
-            payload: _,
-        } in &mut self.entries[start..]
-        {
-            *tag = target.clone();
-        }
-        self.last = Marker::Flipped;
         Some(Flip {
             count: self.entries.len() - start,
             target,
@@ -601,6 +611,22 @@ mod tests {
                 target: tag("en")
             })
         );
+    }
+
+    #[test]
+    fn what_is_planned_is_what_the_flip_covers_and_the_plan_changes_nothing() {
+        let mut history = typed("ab cd", "ru");
+
+        let planned = history.planned(&cycle());
+        assert_eq!(
+            planned,
+            Some(Flip {
+                count: 2,
+                target: tag("en")
+            })
+        );
+        assert_eq!(history.planned(&cycle()), planned);
+        assert_eq!(history.flip(&cycle()), planned);
     }
 
     #[test]

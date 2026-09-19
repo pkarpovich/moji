@@ -12,14 +12,16 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CFRunLoop;
+use objc2_core_graphics::CGEvent;
 
 use crate::barrier::{
     Barrier, Confirmed, Decision, Elapsed, KeyEvent, Request, SETTLE, SWITCH_KEYCODE, Verdict,
 };
 use crate::executable::{self, Executable};
+use crate::history::{self, Action, Flip, History};
 use crate::macos::focus;
 use crate::macos::signals;
-use crate::macos::tap::{self, Held, Placement, Tap, TapError};
+use crate::macos::tap::{self, Held, HeldEvent, Kept, Placement, Tap, TapError};
 use crate::macos::timer::{Repeat, Timer, TimerError};
 use crate::macos::tis::{self, ChangeObserver, Layout, LayoutTag};
 use crate::macos::workspace::BundleId;
@@ -77,18 +79,22 @@ impl Daemon {
         hold: Duration,
     ) -> Result<Daemon, StartError> {
         let state = Rc::new(State {
-            barrier: RefCell::new(Barrier::new(cycle, hold)),
+            barrier: RefCell::new(Barrier::new(cycle.clone(), hold)),
             memory: RefCell::new(Memory::new(pins)),
             layouts,
             held: Held::empty(),
             releases: Cell::new(Releases::default()),
             switched_at: Cell::new(None),
             focused: RefCell::new(None),
+            current: RefCell::new(None),
+            history: RefCell::new(History::new()),
+            cycle,
             watchdog: OnceCell::new(),
             hold,
         });
 
         state.seed_frontmost();
+        state.seed_current();
 
         let watching = Rc::downgrade(&state);
         let watchdog = Timer::install(Repeat::Never, move || {
@@ -103,7 +109,7 @@ impl Daemon {
         let tap = tap::install(
             Placement::Intercept,
             state.held.clone(),
-            move |event, _carried| tapping.on_key(event, Instant::now()),
+            move |event, carried| tapping.on_key(event, carried, Instant::now()),
         )?;
 
         let observing = Rc::clone(&state);
@@ -227,6 +233,12 @@ fn stop_when_swapped(executable: Option<&Executable>) {
     run_loop.stop();
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Switch {
+    Needed,
+    Unnecessary,
+}
+
 struct State {
     barrier: RefCell<Barrier>,
     memory: RefCell<Memory>,
@@ -237,10 +249,13 @@ struct State {
     hold: Duration,
     switched_at: Cell<Option<Instant>>,
     focused: RefCell<Option<BundleId>>,
+    current: RefCell<Option<LayoutTag>>,
+    history: RefCell<History<HeldEvent>>,
+    cycle: Vec<LayoutTag>,
 }
 
 impl State {
-    fn on_key(&self, event: KeyEvent, now: Instant) -> Verdict {
+    fn on_key(&self, event: KeyEvent, carried: &CGEvent, now: Instant) -> Verdict {
         let KeyEvent {
             kind: _,
             keycode,
@@ -258,28 +273,157 @@ impl State {
         };
         let Decision { verdict, request } = decision;
 
+        match verdict {
+            Verdict::Pass => self.on_typed(event, carried),
+            Verdict::Hold => self.on_typed(event, carried),
+            Verdict::Swallow => {}
+        }
+
         match request {
             Request::Nothing => {}
-            Request::Retype => {}
+            Request::Retype => self.on_retype(now),
             Request::Select(tag) => {
                 tracing::debug!(%tag, "the switch key asks for a switch");
                 self.switched_at.set(Some(now));
                 self.arm(self.hold);
-                self.select(&tag);
+                if !self.select(&tag) {
+                    self.selection_failed();
+                }
             }
         }
         verdict
     }
 
+    fn on_typed(&self, event: KeyEvent, carried: &CGEvent) {
+        let action = history::action(event);
+        let tag = self.current.borrow().clone();
+        let Ok(mut history) = self.history.try_borrow_mut() else {
+            return;
+        };
+        match action {
+            Action::Ignore => {}
+            Action::Erase => history.erase(),
+            Action::Clear => history.clear(),
+            Action::Record(kind) => {
+                let Some(captured) = HeldEvent::capture(carried) else {
+                    tracing::warn!("a keystroke could not be captured, so the history is dropped");
+                    history.clear();
+                    return;
+                };
+                history.record(kind, tag, captured);
+            }
+        }
+    }
+
+    fn on_retype(&self, now: Instant) {
+        let planned = {
+            let Ok(history) = self.history.try_borrow() else {
+                return;
+            };
+            history.planned(&self.cycle)
+        };
+        let Some(Flip { count: _, target }) = planned else {
+            tracing::debug!(
+                "nothing moji saw typed is within reach, so the retype key does nothing"
+            );
+            return;
+        };
+
+        let switch = match self.current.borrow().clone() {
+            None => Switch::Needed,
+            Some(current) => match current == target {
+                true => Switch::Unnecessary,
+                false => Switch::Needed,
+            },
+        };
+        match switch {
+            Switch::Unnecessary => {}
+            Switch::Needed => {
+                if !self.select(&target) {
+                    tracing::warn!(%target, "the retype has no layout to select, so nothing is retyped");
+                    return;
+                }
+            }
+        }
+
+        let flipped = {
+            let Ok(mut history) = self.history.try_borrow_mut() else {
+                return;
+            };
+            history.flip(&self.cycle)
+        };
+        let Some(Flip { count, target }) = flipped else {
+            return;
+        };
+
+        tap::post_backspaces(count);
+        self.push_strokes(count);
+
+        match switch {
+            Switch::Unnecessary => {
+                tracing::debug!(
+                    count,
+                    %target,
+                    "the retype replays the keystrokes in the layout that is already selected"
+                );
+                self.release();
+            }
+            Switch::Needed => {
+                let waiting = self.held.len();
+                let accepted = {
+                    let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
+                        return;
+                    };
+                    barrier.on_retype(target.clone(), waiting, now)
+                };
+                if !accepted {
+                    tracing::debug!(
+                        count,
+                        %target,
+                        "the barrier refused the retype, so the keystrokes go out as they are"
+                    );
+                    self.release();
+                    return;
+                }
+                self.switched_at.set(Some(now));
+                self.arm(self.hold);
+                tracing::debug!(
+                    count,
+                    %target,
+                    held = waiting,
+                    "the retype selects another layout and replays the keystrokes once it is confirmed"
+                );
+            }
+        }
+    }
+
+    fn push_strokes(&self, count: usize) {
+        let Ok(history) = self.history.try_borrow() else {
+            return;
+        };
+        for event in history.last(count) {
+            match self.held.push_stroke(event) {
+                Kept::Yes => {}
+                Kept::No => {
+                    tracing::warn!("a keystroke could not be copied for the retype, so it is lost");
+                }
+            }
+        }
+    }
+
     fn on_confirmation(&self) {
-        let current = self.current_tag();
+        self.confirm(self.current_tag(), Instant::now());
+    }
+
+    fn confirm(&self, current: Option<LayoutTag>, now: Instant) {
+        self.current.replace(current.clone());
         self.remember(current.clone());
 
         let confirmed = {
             let Ok(mut barrier) = self.barrier.try_borrow_mut() else {
                 return;
             };
-            barrier.confirmed(current.clone(), Instant::now())
+            barrier.confirmed(current.clone(), now)
         };
         match confirmed {
             Confirmed::Nothing => {}
@@ -297,6 +441,7 @@ impl State {
 
     fn on_activation(&self, app: BundleId, now: Instant) {
         tracing::debug!(%app, "the keyboard moved to another application");
+        self.forget_typed();
         let current = self.current_tag();
         let decided = {
             let Ok(mut memory) = self.memory.try_borrow_mut() else {
@@ -320,7 +465,20 @@ impl State {
         tracing::debug!(%tag, "the application the keyboard moved to asks for a switch");
         self.switched_at.set(Some(now));
         self.arm(self.hold);
-        self.select(&tag);
+        if !self.select(&tag) {
+            self.selection_failed();
+        }
+    }
+
+    fn forget_typed(&self) {
+        let Ok(mut history) = self.history.try_borrow_mut() else {
+            return;
+        };
+        history.clear();
+    }
+
+    fn seed_current(&self) {
+        self.current.replace(self.current_tag());
     }
 
     fn seed_frontmost(&self) {
@@ -393,17 +551,17 @@ impl State {
         }
     }
 
-    fn select(&self, tag: &LayoutTag) {
+    fn select(&self, tag: &LayoutTag) -> bool {
         let Some(layout) = self.layouts.get(tag) else {
             tracing::warn!(%tag, "the barrier named a layout the configuration does not carry");
-            self.selection_failed();
-            return;
+            return false;
         };
         let Err(error) = tis::select(layout) else {
-            return;
+            self.current.replace(Some(tag.clone()));
+            return true;
         };
         tracing::warn!(%tag, %error, "selecting the layout failed");
-        self.selection_failed();
+        false
     }
 
     fn selection_failed(&self) {
@@ -497,7 +655,10 @@ pub fn tag_named(layouts: &BTreeMap<LayoutTag, Layout>, name: &str) -> Option<La
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::CFRetained;
+
     use super::*;
+    use crate::barrier::{EventKind, Stroke};
 
     fn tag(tag: &str) -> LayoutTag {
         LayoutTag(tag.to_string())
@@ -530,6 +691,172 @@ mod tests {
             ),
         );
         layouts
+    }
+
+    fn state() -> State {
+        let cycle = vec![tag("en"), tag("ru")];
+        State {
+            barrier: RefCell::new(Barrier::new(cycle.clone(), HOLD)),
+            memory: RefCell::new(Memory::new(BTreeMap::new())),
+            layouts: universal(),
+            held: Held::empty(),
+            releases: Cell::new(Releases::default()),
+            watchdog: OnceCell::new(),
+            hold: HOLD,
+            switched_at: Cell::new(None),
+            focused: RefCell::new(None),
+            current: RefCell::new(None),
+            history: RefCell::new(History::new()),
+            cycle,
+        }
+    }
+
+    fn keyboard_event(keycode: u16) -> CFRetained<CGEvent> {
+        let Some(event) = CGEvent::new_keyboard_event(None, keycode, true) else {
+            panic!("creating a keyboard event failed");
+        };
+        event
+    }
+
+    fn key(kind: EventKind, keycode: u16) -> KeyEvent {
+        KeyEvent {
+            kind,
+            keycode,
+            flags: 0,
+            timestamp: 0,
+            stroke: Stroke::First,
+        }
+    }
+
+    fn type_letter(state: &State, keycode: u16) {
+        state.on_typed(key(EventKind::Down, keycode), &keyboard_event(keycode));
+    }
+
+    #[test]
+    fn a_confirmation_updates_the_layout_the_daemon_believes_is_selected() {
+        let state = state();
+
+        state.confirm(Some(tag("ru")), Instant::now());
+
+        assert_eq!(*state.current.borrow(), Some(tag("ru")));
+    }
+
+    #[test]
+    fn a_confirmation_of_a_layout_no_tag_names_leaves_the_daemon_without_one() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+
+        state.confirm(None, Instant::now());
+
+        assert_eq!(*state.current.borrow(), None);
+    }
+
+    #[test]
+    fn a_typed_key_lands_in_the_history_under_the_layout_the_daemon_believes_is_selected() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+
+        type_letter(&state, 0);
+        type_letter(&state, 35);
+
+        let Ok(mut history) = state.history.try_borrow_mut() else {
+            panic!("the history is borrowed somewhere else");
+        };
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.flip(&state.cycle),
+            Some(Flip {
+                count: 2,
+                target: tag("en")
+            })
+        );
+    }
+
+    #[test]
+    fn a_click_and_a_caret_key_drop_what_the_history_holds() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+
+        type_letter(&state, 0);
+        state.on_typed(key(EventKind::MouseDown, 0), &keyboard_event(0));
+        assert_eq!(state.history.borrow().len(), 0);
+
+        type_letter(&state, 0);
+        state.on_typed(key(EventKind::Down, 123), &keyboard_event(123));
+
+        assert_eq!(state.history.borrow().len(), 0);
+    }
+
+    #[test]
+    fn delete_erases_one_keystroke_and_a_key_up_leaves_the_history_alone() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+
+        type_letter(&state, 0);
+        type_letter(&state, 35);
+        state.on_typed(key(EventKind::Up, 35), &keyboard_event(35));
+        assert_eq!(state.history.borrow().len(), 2);
+
+        state.on_typed(key(EventKind::Down, 51), &keyboard_event(51));
+
+        assert_eq!(state.history.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_keystroke_typed_in_a_layout_no_tag_names_clears_the_history() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+        type_letter(&state, 0);
+
+        state.confirm(None, Instant::now());
+        type_letter(&state, 35);
+
+        assert_eq!(state.history.borrow().len(), 0);
+    }
+
+    #[test]
+    fn the_keyboard_moving_to_another_application_drops_what_the_history_holds() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+        type_letter(&state, 0);
+
+        state.forget_typed();
+
+        assert_eq!(state.history.borrow().len(), 0);
+    }
+
+    #[test]
+    fn a_retype_with_nothing_typed_posts_nothing_and_holds_nothing() {
+        let state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+
+        state.on_retype(Instant::now());
+
+        assert!(state.held.is_empty());
+        assert_eq!(state.history.borrow().len(), 0);
+    }
+
+    #[test]
+    fn a_retype_that_cannot_select_its_layout_leaves_the_history_as_it_was() {
+        let mut state = state();
+        state.confirm(Some(tag("ru")), Instant::now());
+        type_letter(&state, 0);
+        state.layouts = BTreeMap::new();
+
+        state.on_retype(Instant::now());
+
+        assert!(state.held.is_empty());
+        let Ok(mut history) = state.history.try_borrow_mut() else {
+            panic!("the history is borrowed somewhere else");
+        };
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.flip(&state.cycle),
+            Some(Flip {
+                count: 1,
+                target: tag("en")
+            })
+        );
     }
 
     #[test]

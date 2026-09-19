@@ -214,12 +214,16 @@ impl<T> History<T> {
 **Files:**
 - Modify: `src/daemon.rs`
 
-- [ ] add `current`, `history` and `cycle` to `State`; seed `current` in `start`, write it in `on_confirmation` and when a switch starts
-- [ ] feed the history from `on_key` for `Pass` and `Hold` verdicts per `history::action`, and clear it in `on_activation`
-- [ ] make `select` report whether TIS accepted the layout
-- [ ] implement `on_retype` per Technical Details with the select-first ordering and the debug and warn lines
-- [ ] write tests for whatever pure helper the wiring needs (at minimum: the cached tag is updated by a confirmation and by a started switch, exercised through a `State` built without a tap if the constructor allows it, otherwise state in the checklist that the behaviour is covered by Task 6 and mark this item with that note)
-- [ ] run `mise run check` - must pass before task 6
+- [x] add `current`, `history` and `cycle` to `State`; seed `current` in `start`, write it in `on_confirmation` and when a switch starts
+- [x] feed the history from `on_key` for `Pass` and `Hold` verdicts per `history::action`, and clear it in `on_activation`
+- [x] make `select` report whether TIS accepted the layout
+- [x] implement `on_retype` per Technical Details with the select-first ordering and the debug and warn lines
+- [x] write tests for whatever pure helper the wiring needs (a `State` is built without a tap in `daemon.rs`: a confirmation updates the cached tag, a confirmation of an untagged layout drops it, a typed key lands in the history under the cached tag, a click and a caret key clear it, delete erases and a key-up does nothing, an untagged layout clears instead of recording, a focus move clears, a retype with an empty history posts nothing, a retype whose layout cannot be selected leaves the history as it was. The cached tag after a *started* switch is written inside `select`, which calls TIS and so cannot run off the main thread: it is covered by the Task 6 live scenarios)
+- [x] run `mise run check` - must pass before task 6
+
+⚠️ The plan left the select-first split open; it is `History::planned`, a non-mutating twin of `flip` that answers the same `Flip`. `on_retype` asks it for the target, selects, and only then calls `flip`, so a refused select leaves the history exactly as the user typed it.
+➕ `select` writes the cached tag itself when TIS accepts, which is the one place every started switch passes through - the switch key, the per-application policy and the retype - and it no longer calls `selection_failed`: `on_key` and `on_activation` do that on a refusal, and `on_retype` returns instead.
+➕ `State::forget_typed` clears the history from `on_activation`, and `on_confirmation` is split into it and `confirm(current, now)`, which is what the tests drive without TIS.
 
 ### Task 6: Live acceptance scenarios
 
