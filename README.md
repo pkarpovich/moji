@@ -36,11 +36,25 @@ ru = "Russian - Universal"
 - `[apps]` pins a layout to a bundle id. Every application not listed gets the layout it last used, which moji records when the application loses focus and whenever the layout changes. An application whose decided layout is already the selected one is left alone, for the same no-notification reason. Which application the keyboard goes to is asked of Accessibility every 50 ms rather than of the workspace: a launcher such as Tuna shows its panel without activating, so the workspace keeps naming the window behind it while the panel takes the keys, and Accessibility's focused application follows the keys. `moji status` prints that bundle id, which is how to find the one to pin.
 - An unknown field, a tag `[layouts]` does not carry, or a name no enabled layout answers to is an error that names the file, the field and what was expected. `moji --check-config` parses, resolves every tag against the enabled layouts, prints what it made of the file, and exits.
 
+## Retyping the last word
+
+The second signal key, **F18**, retypes what was just typed in the other layout. moji keeps the keystrokes it saw - up to 512 of them - and a press posts that many backspaces, selects the next layout in the cycle, and replays the very events it captured. A replayed keystroke types the letter of the layout selected after it was captured, because the receiving application translates the keycode itself, so moji never learns which letter a keycode makes and never touches the text field.
+
+- The first press covers the **last word**: the letters back to the space before them, plus the spaces that follow.
+- The next press, with nothing typed in between, covers the **whole tail**: everything typed since the layout last changed under the fingers. Typing again makes the press after it a word again, and a third press flips the same tail once more, which with a two-layout cycle puts it back.
+- The layout to retype in is the one after the layout the covered keystrokes were typed in, so a word typed before a manual switch is retyped without switching again.
+
+What moji did not see, it cannot flip. The history holds only keystrokes that passed the tap since it started, so text typed before moji ran, pasted text, and text selected with the mouse are out of reach. These forget the history outright: a click, Return, Tab, Escape, an arrow or any other caret key, a chord carrying Command or Control, the keyboard moving to another application, and a keystroke typed in a layout no tag in the configuration names. Delete drops the last keystroke, as it did downstream.
+
+A press with nothing in reach does nothing, and so does one while a switch is still running. When the layout cannot be selected, nothing is deleted and nothing is replayed: the text stays as it was typed.
+
 ## The contract with Karabiner
 
 Karabiner stops switching layouts. It keeps its tap-vs-hold logic per device and emits **F19** (virtual keycode 80) instead of `select_input_source`: globe on the built-in keyboard, left Control on external keyboards, left Shift on the Corne. moji swallows both the down and the up of that key and owns everything that follows.
 
-While moji is not running, F19 is an unbound key and nothing switches. That is the accepted failure mode of having a single owner; launchd's `KeepAlive` on the program path and the upgrade self-restart are what keep the window small.
+The retype key is **F18** (virtual keycode 79), emitted on a key of its own, and moji swallows its down, its repeat and its up the same way. Neither keycode is configurable: which physical key produces it is Karabiner's half of the contract.
+
+While moji is not running, F19 and F18 are unbound keys and nothing switches. That is the accepted failure mode of having a single owner; launchd's `KeepAlive` on the program path and the upgrade self-restart are what keep the window small.
 
 ## Permissions
 

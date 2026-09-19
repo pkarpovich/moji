@@ -1,6 +1,6 @@
 # moji conventions
 
-`README.md` carries what moji is, its configuration and the contract with Karabiner; this file carries only the rules that govern how code is written here. The plan that built the daemon, with the verified API behaviour behind every decision, is `docs/plans/completed/20260918-moji-layout-daemon.md`.
+`README.md` carries what moji is, its configuration and the contract with Karabiner; this file carries only the rules that govern how code is written here. The plan that built the daemon, with the verified API behaviour behind every decision, is `docs/plans/completed/20260918-moji-layout-daemon.md`, and the one that added the retype key is `docs/plans/completed/20260919-moji-retype-last-word.md`.
 
 ## Everything runs natively on macOS
 
@@ -24,11 +24,17 @@ Measured on this machine: Tuna's panel takes the keyboard without activating, so
 
 ## The ordering logic is pure
 
-`src/barrier.rs` and `src/memory.rs` take plain data and the clock, and return decisions the `src/macos/` layer executes. The barrier never holds a Core Foundation object and the tap layer owns the queue of held events. That split is what makes the ordering testable with a fake clock.
+`src/barrier.rs`, `src/memory.rs`, `src/cycle.rs` and `src/history.rs` take plain data and the clock, and return decisions the `src/macos/` layer executes. The pure modules never know about Core Foundation objects; `History<T>` carries one as an opaque payload, never looking inside it, and the tap layer owns the queue of held events. That split is what makes the ordering and the flip testable with a fake clock and a `History<()>`.
+
+The history is what the retype key reads. `history::action` turns one `KeyEvent` into `Record`, `Erase`, `Clear` or `Ignore`, and the daemon feeds it from the same `on_key` that drives the barrier: a letter or a space is recorded under the tag the daemon has cached for the selected layout, Delete erases the last entry, and a click, a caret key, a Command or Control chord, a layout no tag names and the keyboard moving to another application all clear it. A tag it cannot name is a keystroke it could never retype, so an absent tag clears rather than records. The two signal keys are `Ignore`: they are moji's, not the text's.
+
+A flip is select first, then delete, then replay. `History::planned` answers what the next flip would cover without touching the history, `State::on_retype` selects that layout and returns on a refusal, and only a selection TIS accepted reaches `History::flip`, `tap::post_backspaces` and the strokes pushed onto the held queue for the barrier's release. That order is what leaves the text exactly as the user typed it when the layout cannot be selected.
 
 ## A replayed event is the captured one, unchanged
 
 Measured on this machine, and the reason the tap layer carries no keycode translation: re-posting the very `CGEvent` a tap captured before the switch types the letter of the layout selected **after** the capture. A captured event carrying the unicode string `"a"`, posted once Russian was selected, typed `ф`. The receiving application re-translates the keycode against the current source and ignores the unicode string the event carries.
+
+That is also why the tap's mask carries the three mouse-down types next to the keyboard ones: a click moves the caret somewhere the history cannot follow, so the tap reports it as `EventKind::MouseDown`, which passes through the barrier untouched and clears the history.
 
 So `HeldEvent` is a `CGEventCreateCopy` posted as it is, plus a magic value written into `kCGEventSourceUserData`. That magic is what keeps the tap from re-entering the barrier on its own replays, and it is the only thing a replayed event carries that the captured one did not. Do not add `CGEventKeyboardSetUnicodeString`, and do not reach for `UCKeyTranslate`: nothing needs moji to know which letter a keycode makes.
 

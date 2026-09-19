@@ -260,9 +260,9 @@ The audit, claim by claim:
 **Files:**
 - Modify: `README.md`, `CLAUDE.md`
 
-- [ ] README: a section on retyping (what a press and a second press do, what clears the history, what cannot be flipped), and F18 added to the contract with Karabiner next to F19
-- [ ] CLAUDE.md: rewrite "the barrier never holds a Core Foundation object" as "the pure modules never know about Core Foundation objects; `History<T>` carries one as an opaque payload"; add a paragraph on the history, its reset signals and the select-first order of a flip; mention mouse-down in the tap mask in the replay section
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README: a section on retyping (what a press and a second press do, what clears the history, what cannot be flipped), and F18 added to the contract with Karabiner next to F19
+- [x] CLAUDE.md: rewrite "the barrier never holds a Core Foundation object" as "the pure modules never know about Core Foundation objects; `History<T>` carries one as an opaque payload"; add a paragraph on the history, its reset signals and the select-first order of a flip; mention mouse-down in the tap mask in the replay section
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
