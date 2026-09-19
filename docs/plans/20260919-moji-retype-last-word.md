@@ -230,11 +230,14 @@ impl<T> History<T> {
 **Files:**
 - Modify: `tests/live.rs`, `scripts/acceptance.sh`
 
-- [ ] add `a_sentence_typed_in_the_wrong_layout_is_retyped_word_first_then_whole` per Technical Details
-- [ ] add `a_word_typed_before_a_manual_switch_is_retyped_without_a_second_switch` per Technical Details
-- [ ] register both in `SCENARIOS` and in `LIVE_TESTS`
-- [ ] run `./scripts/acceptance.sh` - every scenario prints `live: <name> passed`
-- [ ] run `mise run check` - must pass before task 7
+- [x] add `a_sentence_typed_in_the_wrong_layout_is_retyped_word_first_then_whole` per Technical Details
+- [x] add `a_word_typed_before_a_manual_switch_is_retyped_without_a_second_switch` per Technical Details
+- [x] register both in `SCENARIOS` and in `LIVE_TESTS`
+- [x] run `./scripts/acceptance.sh` (skipped - not automatable in this session, see the Task 4 note and the one below)
+- [x] run `mise run check` - must pass before task 7
+
+⚠️ `./scripts/acceptance.sh` is still unrunnable here for the reason Task 4 recorded: every live scenario panics in `src/macos/harness.rs` at "the harness window never became frontmost", including `an_untouched_view_is_empty_and_a_set_string_reads_back`, which installs no tap and switches no layout. That proves the blocker is the session having no interactive GUI focus rather than anything in these two scenarios. What could be checked was: both names resolve through `SCENARIOS` (the run reaches `Window::open`, so the lookup succeeded), and the `LIVE_TESTS` list matches the registered names one for one.
+➕ `post_keys`, `post_retype`, `wait_for_exactly` and the `FOCUS_SETTLE` pump after `start_daemon` are the new helpers; the pump lets the first focus poll happen before anything is typed, so its `on_activation` cannot clear the history the scenario is about to build.
 
 ### Task 7: Verify acceptance criteria
 

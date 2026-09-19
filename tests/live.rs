@@ -14,7 +14,7 @@ use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use moji::barrier::SWITCH_KEYCODE;
+use moji::barrier::{RETYPE_KEYCODE, SWITCH_KEYCODE};
 use moji::daemon::{Daemon, Releases};
 use moji::macos::harness::{self, KEYCODE_A, Stroke, Window};
 use moji::macos::tis::{self, Layout, LayoutTag};
@@ -26,6 +26,14 @@ const RUSSIAN_A: &str = "ф";
 const SETTLE: Duration = Duration::from_millis(500);
 const HOLD: Duration = Duration::from_millis(50);
 const BURST: usize = 5;
+const FOCUS_SETTLE: Duration = Duration::from_millis(150);
+const SENTENCE: &[u16] = &[0, 35, 35, 49, 9, 14, 15, 1, 34, 31, 45];
+const SENTENCE_IN_RUSSIAN: &str = "фзз мукышщт";
+const SENTENCE_WORD_RETYPED: &str = "фзз version";
+const SENTENCE_RETYPED: &str = "app version";
+const GREETING: &[u16] = &[5, 4, 11, 2, 17, 45];
+const GREETING_IN_ENGLISH: &str = "ghbdtn";
+const GREETING_RETYPED: &str = "привет";
 
 const SCENARIOS: &[(&str, fn())] = &[
     (
@@ -47,6 +55,14 @@ const SCENARIOS: &[(&str, fn())] = &[
     (
         "activating_a_pinned_application_selects_its_layout",
         activating_a_pinned_application_selects_its_layout,
+    ),
+    (
+        "a_sentence_typed_in_the_wrong_layout_is_retyped_word_first_then_whole",
+        a_sentence_typed_in_the_wrong_layout_is_retyped_word_first_then_whole,
+    ),
+    (
+        "a_word_typed_before_a_manual_switch_is_retyped_without_a_second_switch",
+        a_word_typed_before_a_manual_switch_is_retyped_without_a_second_switch,
     ),
 ];
 
@@ -400,4 +416,124 @@ fn an_untouched_view_is_empty_and_a_set_string_reads_back() {
 
     window.clear();
     assert_eq!(window.typed_text(), "");
+}
+
+fn post_keys(keycodes: &[u16]) {
+    for keycode in keycodes {
+        harness::post_key(*keycode, Stroke::Down);
+        harness::post_key(*keycode, Stroke::Up);
+    }
+}
+
+fn post_retype() {
+    harness::post_key(RETYPE_KEYCODE, Stroke::Down);
+    harness::post_key(RETYPE_KEYCODE, Stroke::Up);
+}
+
+fn wait_for_exactly(window: &Window, wanted: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let typed = window.typed_text();
+        if typed == wanted {
+            return typed;
+        }
+        if Instant::now() >= deadline {
+            return typed;
+        }
+        window.pump(Duration::from_millis(10));
+    }
+}
+
+fn a_sentence_typed_in_the_wrong_layout_is_retyped_word_first_then_whole() {
+    let english = layout_named(ENGLISH);
+    let russian = layout_named(RUSSIAN);
+
+    let window = Window::open();
+    select_and_wait(&window, &russian);
+
+    let daemon = start_daemon(&english, &russian);
+    window.clear();
+    window.pump(FOCUS_SETTLE);
+
+    post_keys(SENTENCE);
+    let typed = wait_for_exactly(&window, SENTENCE_IN_RUSSIAN, SETTLE * 4);
+    println!("live: the sentence landed as {typed:?}");
+    assert_eq!(
+        typed, SENTENCE_IN_RUSSIAN,
+        "the keycodes of {SENTENCE_RETYPED:?} did not type {SENTENCE_IN_RUSSIAN:?} on {RUSSIAN}"
+    );
+
+    post_retype();
+    let word = wait_for_exactly(&window, SENTENCE_WORD_RETYPED, SETTLE * 4);
+    let selected = wait_for_layout(&window, ENGLISH, SETTLE);
+    println!("live: the first press left {word:?} on {selected:?}");
+    assert_eq!(
+        word, SENTENCE_WORD_RETYPED,
+        "the first press of the retype key did not retype the last word alone"
+    );
+    assert_eq!(
+        selected, ENGLISH,
+        "the retype did not leave {ENGLISH} selected, so the following keys land in {RUSSIAN}"
+    );
+
+    post_retype();
+    let whole = wait_for_exactly(&window, SENTENCE_RETYPED, SETTLE * 4);
+    let Releases { count, last } = daemon.releases();
+    drop(daemon);
+
+    println!("live: the second press left {whole:?} after {count} watchdog releases");
+    assert_eq!(
+        whole, SENTENCE_RETYPED,
+        "the second press of the retype key did not cover the whole tail"
+    );
+    assert_eq!(
+        count, 0,
+        "the watchdog released {last} events, so a confirmation lost the race it should win"
+    );
+}
+
+fn a_word_typed_before_a_manual_switch_is_retyped_without_a_second_switch() {
+    let english = layout_named(ENGLISH);
+    let russian = layout_named(RUSSIAN);
+
+    let window = Window::open();
+    select_and_wait(&window, &english);
+
+    let daemon = start_daemon(&english, &russian);
+    window.clear();
+    window.pump(FOCUS_SETTLE);
+
+    post_keys(GREETING);
+    let typed = wait_for_exactly(&window, GREETING_IN_ENGLISH, SETTLE * 4);
+    println!("live: the word landed as {typed:?}");
+    assert_eq!(
+        typed, GREETING_IN_ENGLISH,
+        "the keycodes of {GREETING_IN_ENGLISH:?} did not type it on {ENGLISH}"
+    );
+
+    select_and_wait(&window, &russian);
+    let Releases {
+        count: before,
+        last: _,
+    } = daemon.releases();
+
+    post_retype();
+    let retyped = wait_for_exactly(&window, GREETING_RETYPED, SETTLE * 4);
+    let selected = wait_for_layout(&window, RUSSIAN, SETTLE);
+    let Releases { count, last } = daemon.releases();
+    drop(daemon);
+
+    println!("live: the press after the manual switch left {retyped:?} on {selected:?}");
+    assert_eq!(
+        retyped, GREETING_RETYPED,
+        "the retype after a manual switch did not retype the word in {RUSSIAN}"
+    );
+    assert_eq!(
+        selected, RUSSIAN,
+        "the retype switched the layout a second time, away from the one the user chose"
+    );
+    assert_eq!(
+        count, before,
+        "the retype held its keys behind a switch nobody confirmed, releasing {last} events"
+    );
 }
